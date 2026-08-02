@@ -1,0 +1,62 @@
+[Unit]
+Description=Daemon For Controlling Fan Speeds
+After=network-online.target 
+Wants=network-online.target 
+
+StartLimitIntervalSec=60s
+StartLimitBurst=5
+
+[Service]
+Type=notify
+NotifyAccess=main
+
+ExecStart=/usr/bin/python3 /opt/fand/lib/daemon.py -v 
+ExecReload=/bin/kill -HUP $MAINPID
+#ExecStopPost=/usr/bin/ipmitool raw 0x30 0x30 0x01 0x00
+
+User=fand
+Group=fand
+SupplementaryGroups=qemu
+
+Restart=on-failure
+RestartSec=5s
+
+# Let systemd kill the whole process tree cleanly on stop.
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=60s
+TimeoutStartSec=60s
+FinalKillSignal=SIGKILL
+
+WatchdogSec=60
+
+EnvironmentFile=/opt/fand/env_file
+WorkingDirectory=/opt/fand
+ReadWritePaths=/opt/fand /run/fand /run/qemu
+RuntimeDirectory=fand
+
+#Security 
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+#MemoryDenyWriteExecute=true
+RestrictNamespaces=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+UMask=0077
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=fand
+
+[Install]
+WantedBy=multi-user.target
