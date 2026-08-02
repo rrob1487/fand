@@ -6,6 +6,8 @@ logs/
 .env
 .env.local
 *.pem
+.claude/
+CLAUDE.md
 
 # ---------------------------------------------------------------------------
 # Dependencies & Package Managers
