@@ -41,6 +41,7 @@ class SensorManager:
                 continue
             state.update_temperature(name, value)
             state.clear_alarm(f"sensor_failure:{name}")
+            _log.debug("sensor %r = %.1f", name, value)
 
 
 @retry(attempts=3, backoff=0.5)
