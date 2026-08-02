@@ -1,0 +1,11 @@
+[name]
+vm = "vm"
+
+[qga]
+socket = "/run/qemu/qemu-vm-ga.sock"
+
+[gpu]
+type = "nvidia"
+
+[limits]
+max_temperature = 85

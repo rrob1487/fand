@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
-import argparse
 import logging
 import os
 import signal
 import socket
-import sys
 import time
 from pathlib import Path
+
+from lib.controller import Controller
+from lib.hardware.ipmi import IPMI, IPMIFanController
+from lib.managers.config_manager import ConfigError, ConfigManager
+from lib.managers.sensor_manager import SensorManager
+from lib.managers.vm_manager import VMManager
+from lib.policy import Policy
 
 
 # --------------------------------------------------------------------------
@@ -51,12 +56,19 @@ class SdNotifier:
 # Daemon
 # --------------------------------------------------------------------------
 class Daemon:
-    def __init__(self, poll_interval: float = 5.0, dry_run: bool = False) -> None:
+    def __init__(
+        self, config_dir: Path, poll_interval: float | None = None, dry_run: bool = False,
+    ) -> None:
+        self.config_dir = config_dir
         self.poll_interval = poll_interval
         self.dry_run = dry_run
         self.log = logging.getLogger("fand")
         self.notifier = SdNotifier()
         self._shutdown_requested = False
+
+        self._config_manager: ConfigManager | None = None
+        self._ipmi: IPMI | None = None
+        self._controller: Controller | None = None
 
         # Watchdog interval, if the unit sets WatchdogSec=. systemd exposes
         # it as WATCHDOG_USEC (microseconds).
@@ -81,17 +93,41 @@ class Daemon:
         self.reload_config()
 
     def reload_config(self) -> None:
-        # TODO: re-read config file(s) here.
-        pass
+        # A bad edit here shouldn't take down an otherwise-healthy running
+        # daemon, so failures are logged and the previous good config/
+        # Controller stay in effect (unlike setup(), where failure is fatal).
+        try:
+            self._config_manager.reload()
+            self._controller = self._build_controller()
+        except ConfigError as exc:
+            self.log.error("reload failed, keeping previous configuration: %s", exc)
+        else:
+            self.log.info("Configuration reloaded")
 
     def setup(self) -> None:
-        """One-time startup work: open connections, warm caches, etc."""
+        """One-time startup work: load config, discover sensors, build the
+        control pipeline."""
         self.log.info("Starting up")
-        # TODO: real initialization goes here.
+        self._config_manager = ConfigManager(self.config_dir)
+        self._config_manager.load()
+
+        if self.poll_interval is None:
+            self.poll_interval = self._config_manager.config.daemon.poll_interval
+
+        self._ipmi = IPMI()
+        self._controller = self._build_controller()
+
+    def _build_controller(self) -> Controller:
+        vm_manager = VMManager(self._config_manager.vms)
+        sensor_manager = SensorManager(vm_manager, self._ipmi)
+        sensor_manager.discover()
+        policy = Policy(self._config_manager.config.fan_curve, self._config_manager.config.safety)
+        fan_controller = IPMIFanController(self._ipmi)
+        return Controller(sensor_manager, policy, fan_controller, dry_run=self.dry_run)
 
     def do_work(self) -> None:
-        """One iteration of the daemon's actual job. Replace this."""
-        self.log.debug("Doing work-" + str(time.monotonic()))
+        """One iteration of the daemon's actual job: run one control cycle."""
+        self._controller.run_cycle()
 
     def maybe_ping_watchdog(self) -> None:
         if self._watchdog_interval is None:
@@ -138,50 +174,4 @@ class Daemon:
         """One-time cleanup work: close connections, flush buffers, etc."""
         self.log.info("Shut down cleanly")
         # TODO: real cleanup goes here.
-
-
-# --------------------------------------------------------------------------
-# Entry point
-# --------------------------------------------------------------------------
-def configure_logging(verbose: bool) -> None:
-    level = logging.DEBUG if verbose else logging.INFO
-    logging.basicConfig(
-        level=level,
-        # No timestamp/PID prefix needed: journald adds its own metadata.
-        format="%(name)s: %(levelname)s: %(message)s",
-        stream=sys.stdout,
-    )
-
-
-def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="mydaemon")
-    parser.add_argument(
-        "-c", "--config", type=Path, default=Path("/opt/fand/config"),
-        help="Path to config directory",
-    )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Do not change hardware state"
-    )
-    parser.add_argument(
-        "--poll-interval", type=float, default=10.0,
-        help="Seconds between work iterations",
-    )
-    parser.add_argument(
-        "-v", "--verbose", action="store_true", help="Enable debug logging",
-    )
-    return parser.parse_args(argv)
-
-
-def main() -> int:
-    args = parse_args()
-    configure_logging(args.verbose)
-
-    daemon = Daemon(poll_interval=args.poll_interval, dry_run=args.dry_run)
-    return daemon.run()
-
-
-if __name__ == "__main__":
-    sys.exit(main())
 

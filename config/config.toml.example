@@ -1,0 +1,28 @@
+[daemon]
+poll_interval = 5
+log_level = "INFO"
+
+[fan_curve]
+# Ordered (temperature_c, fan_percent) points; the policy layer
+# interpolates between them.
+points = [
+    [40, 20],
+    [50, 30],
+    [60, 40],
+    [75, 70],
+    [85, 100],
+]
+# Minimum drop (in fan percent) required before the target is allowed to
+# decrease; prevents oscillation. Rising targets are never damped.
+hysteresis_percent = 5
+
+[safety]
+# Must stay above the fan curve's highest point (85 above) so there's a
+# real WARNING band between "curve maxed out" and EMERGENCY.
+max_temperature = 90
+# Shut down the host when safety.max_temperature is reached, after
+# forcing fans to 100%. See docs/state_machine.md's EMERGENCY actions.
+shutdown_on_emergency = false
+
+[watchdog]
+enabled = true

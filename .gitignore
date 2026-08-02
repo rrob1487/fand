@@ -1,7 +1,11 @@
 # ---------------------------------------------------------------------------
 # Environment Variables & Secrets (NEVER commit these)
 # ---------------------------------------------------------------------------
-config/
+config/*
+!config/*.example
+!config/vms/
+config/vms/*
+!config/vms/*.example
 logs/
 .env
 .env.local

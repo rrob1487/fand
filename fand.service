@@ -10,9 +10,9 @@ StartLimitBurst=5
 Type=notify
 NotifyAccess=main
 
-ExecStart=/usr/bin/python3 /opt/fand/lib/daemon.py -v 
+ExecStart=/usr/bin/python3 /opt/fand/fand.py -v
 ExecReload=/bin/kill -HUP $MAINPID
-#ExecStopPost=/usr/bin/ipmitool raw 0x30 0x30 0x01 0x00
+#ExecStopPost=/usr/bin/ipmitool raw 0x30 0x30 0x01 0x01
 
 User=fand
 Group=fand
@@ -30,7 +30,7 @@ FinalKillSignal=SIGKILL
 
 WatchdogSec=60
 
-EnvironmentFile=/opt/fand/env_file
+EnvironmentFile=/opt/fand/.env
 WorkingDirectory=/opt/fand
 ReadWritePaths=/opt/fand /run/fand /run/qemu
 RuntimeDirectory=fand

@@ -300,6 +300,8 @@ Contains:
 ```python
 class IPMI:
     raw_command()
+    sensor_readings()
+    temperature_sensor_names()
 
 class IPMISensor(Sensor):
     read()
@@ -312,6 +314,14 @@ class IPMIFanController:
 - temperature reading
 - fan speed control
 - Dell raw command support
+- `temperature_sensor_names()`: names of every BMC sensor reporting a
+  temperature unit (e.g. `"degrees C"` in `ipmitool sensor`'s output),
+  excluding non-temperature numeric sensors (fan RPM, voltage, power
+  draw, ...). Sensor count and naming vary by chassis — some boards
+  report two identically-named `"Temp"` sensors for dual CPUs — so this
+  is discovered from hardware at runtime rather than hand-enumerated in
+  configuration. Disambiguates repeated names in encounter order:
+  `"Temp"`, `"Temp #2"`, ...
 
 **Must NOT do:**
 - Decide cooling policy
@@ -336,12 +346,18 @@ class IPMIFanController:
 - models
 - hardware classes
 
-**Must provide** — example:
+**Must provide:**
 
+```python
+create_gpu_sensor(vm: VMConfig, timeout: float = 5.0) -> GPUSensor
+discover_ipmi_sensors(ipmi: IPMI) -> list[IPMISensor]
 ```
-gpu  → GPUSensor
-ipmi → IPMISensor
-```
+
+`create_gpu_sensor` builds a `GPUSensor` from a VM's configuration (one
+GPU sensor per VM, matching `vm.toml`). `discover_ipmi_sensors` calls
+`IPMI.temperature_sensor_names()` and builds one `IPMISensor` per name
+reported — IPMI sensor count and naming is hardware-specific, not
+something `config.toml` enumerates.
 
 **Must NOT do:**
 - Contain temperature policy
