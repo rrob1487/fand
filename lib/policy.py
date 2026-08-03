@@ -67,7 +67,17 @@ class Policy:
             else None
         )
 
+        was_emergency = state.mode is OperatingMode.EMERGENCY
+        emergency_exit_temp = self._safety.max_temperature - self._safety.recovery_margin_c
+
         if hottest >= self._safety.max_temperature:
+            mode = OperatingMode.EMERGENCY
+            target = 100.0
+            shutdown_requested = self._safety.shutdown_on_emergency
+        elif was_emergency and hottest >= emergency_exit_temp:
+            # Stay in EMERGENCY until temperature drops below the recovery
+            # margin, not just below max_temperature, so a sensor hovering
+            # at the limit doesn't flap mode/fan speed every cycle.
             mode = OperatingMode.EMERGENCY
             target = 100.0
             shutdown_requested = self._safety.shutdown_on_emergency

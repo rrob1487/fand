@@ -23,6 +23,10 @@ max_temperature = 90
 # Shut down the host when safety.max_temperature is reached, after
 # forcing fans to 100%. See docs/state_machine.md's EMERGENCY actions.
 shutdown_on_emergency = false
+# Once EMERGENCY triggers, temperature must drop this many degrees below
+# max_temperature before the daemon leaves EMERGENCY. Prevents mode/fan
+# speed from flapping when a sensor hovers right at the limit.
+recovery_margin_c = 5
 
 [watchdog]
 enabled = true

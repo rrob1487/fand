@@ -20,6 +20,7 @@ class SensorManager:
         self._vm_manager = vm_manager
         self._ipmi = ipmi
         self._sensors: dict[str, Sensor] = {}
+        self._failed_sensors: set[str] = set()
 
     def discover(self) -> None:
         """Rebuild the sensor set: one GPU sensor per VM plus every
@@ -35,10 +36,15 @@ class SensorManager:
             try:
                 value = _read_sensor(sensor)
             except Exception as exc:
-                _log.warning("sensor %r failed: %s", name, exc)
+                if name not in self._failed_sensors:
+                    _log.warning("sensor %r lost: %s", name, exc)
+                    self._failed_sensors.add(name)
                 state.clear_temperature(name)
                 state.set_alarm(f"sensor_failure:{name}")
                 continue
+            if name in self._failed_sensors:
+                _log.info("sensor %r recovered", name)
+                self._failed_sensors.discard(name)
             state.update_temperature(name, value)
             state.clear_alarm(f"sensor_failure:{name}")
             _log.debug("sensor %r = %.1f", name, value)

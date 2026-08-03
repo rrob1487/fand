@@ -39,12 +39,14 @@ class FanCurveConfig:
 class SafetyConfig:
     max_temperature: float
     shutdown_on_emergency: bool = False
+    recovery_margin_c: float = 0.0
 
     @classmethod
     def from_dict(cls, data: dict) -> "SafetyConfig":
         return cls(
             max_temperature=data["max_temperature"],
             shutdown_on_emergency=data.get("shutdown_on_emergency", False),
+            recovery_margin_c=data.get("recovery_margin_c", 0.0),
         )
 
 

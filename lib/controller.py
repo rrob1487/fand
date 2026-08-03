@@ -86,6 +86,19 @@ class Controller:
         else:
             self.state.set_last_command_result(success=True, detail=f"set to {percent:.0f}%")
 
+    def release_fan_control(self) -> None:
+        """Hand fan control back to iDRAC automatic mode. Must not raise —
+        called during teardown/shutdown, where a failure can't block exit."""
+        if self._dry_run:
+            _log.info("[dry-run] would release fan control to automatic mode")
+            return
+        try:
+            self._fan_controller.enable_automatic_control()
+        except IPMIError as exc:
+            _log.error("failed to restore automatic fan control: %s", exc)
+        else:
+            _log.info("Released fan control to iDRAC automatic mode")
+
     def _shutdown_host(self) -> None:
         if self._dry_run:
             _log.info("[dry-run] would issue systemctl poweroff")

@@ -189,7 +189,8 @@ class Daemon:
         return exit_code
 
     def teardown(self) -> None:
-        """One-time cleanup work: close connections, flush buffers, etc."""
+        """One-time cleanup work: release fan control back to iDRAC."""
+        if self._controller is not None:
+            self._controller.release_fan_control()
         self.log.info("Shut down cleanly")
-        # TODO: real cleanup goes here.
 
