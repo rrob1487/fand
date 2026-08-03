@@ -63,7 +63,12 @@ def main() -> int:
     load_env_file(args.env_file)
     configure_logging(args.verbose)
 
-    daemon = Daemon(config_dir=args.config, poll_interval=args.poll_interval, dry_run=args.dry_run)
+    daemon = Daemon(
+        config_dir=args.config,
+        poll_interval=args.poll_interval,
+        dry_run=args.dry_run,
+        verbose=args.verbose,
+    )
     return daemon.run()
 
 

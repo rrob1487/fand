@@ -10,9 +10,9 @@ StartLimitBurst=5
 Type=notify
 NotifyAccess=main
 
-ExecStart=/usr/bin/python3 /opt/fand/fand.py -v
+ExecStart=/usr/bin/python3 /opt/fand/fand.py
 ExecReload=/bin/kill -HUP $MAINPID
-#ExecStopPost=/usr/bin/ipmitool raw 0x30 0x30 0x01 0x01
+ExecStopPost=/usr/bin/ipmitool raw 0x30 0x30 0x01 0x01
 
 User=fand
 Group=fand

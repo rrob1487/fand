@@ -11,8 +11,8 @@ import subprocess
 
 from lib.hardware.ipmi import IPMIError, IPMIFanController
 from lib.managers.sensor_manager import SensorManager
-from lib.policy import Policy
-from lib.state import State
+from lib.policy import FanDecision, Policy
+from lib.state import OperatingMode, State
 from lib.utils.logging import get_logger
 from lib.utils.retry import retry
 
@@ -31,6 +31,8 @@ class Controller:
         self._policy = policy
         self._fan_controller = fan_controller
         self._dry_run = dry_run
+        self._last_logged_speed: float | None = None
+        self._last_logged_mode: OperatingMode | None = None
         self.state = State()
 
     def run_cycle(self) -> None:
@@ -39,13 +41,39 @@ class Controller:
         """
         self._sensor_manager.poll(self.state)
         decision = self._policy.evaluate(self.state)
+        self._log_fan_decision(decision)
         self._apply_fan_speed(decision.fan_speed_percent)
         if decision.shutdown_requested:
             self._shutdown_host()
 
+    def _log_fan_decision(self, decision: FanDecision) -> None:
+        """Log at INFO (visible with or without -v) only when the fan
+        target or operating mode actually changes, to avoid repeating an
+        identical line every cycle on a steady system."""
+        unchanged = (
+            decision.fan_speed_percent == self._last_logged_speed
+            and decision.mode == self._last_logged_mode
+        )
+        if unchanged:
+            return
+
+        prefix = "[dry-run] " if self._dry_run else ""
+        if self._last_logged_speed is None:
+            _log.info(
+                "%sFan speed set to %.0f%% (mode=%s)",
+                prefix, decision.fan_speed_percent, decision.mode.name,
+            )
+        else:
+            _log.info(
+                "%sFan speed %.0f%% -> %.0f%% (mode=%s -> %s)",
+                prefix, self._last_logged_speed, decision.fan_speed_percent,
+                self._last_logged_mode.name, decision.mode.name,
+            )
+        self._last_logged_speed = decision.fan_speed_percent
+        self._last_logged_mode = decision.mode
+
     def _apply_fan_speed(self, percent: float) -> None:
         if self._dry_run:
-            _log.info("[dry-run] would set fan speed to %.0f%%", percent)
             self.state.set_last_command_result(
                 success=True, detail=f"[dry-run] would set to {percent:.0f}%",
             )

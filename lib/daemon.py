@@ -15,6 +15,7 @@ from lib.managers.config_manager import ConfigError, ConfigManager
 from lib.managers.sensor_manager import SensorManager
 from lib.managers.vm_manager import VMManager
 from lib.policy import Policy
+from lib.utils.logging import set_level
 
 
 # --------------------------------------------------------------------------
@@ -57,11 +58,16 @@ class SdNotifier:
 # --------------------------------------------------------------------------
 class Daemon:
     def __init__(
-        self, config_dir: Path, poll_interval: float | None = None, dry_run: bool = False,
+        self,
+        config_dir: Path,
+        poll_interval: float | None = None,
+        dry_run: bool = False,
+        verbose: bool = False,
     ) -> None:
         self.config_dir = config_dir
         self.poll_interval = poll_interval
         self.dry_run = dry_run
+        self.verbose = verbose
         self.log = logging.getLogger("fand")
         self.notifier = SdNotifier()
         self._shutdown_requested = False
@@ -98,6 +104,7 @@ class Daemon:
         # Controller stay in effect (unlike setup(), where failure is fatal).
         try:
             self._config_manager.reload()
+            self._apply_log_level()
             self._controller = self._build_controller()
         except ConfigError as exc:
             self.log.error("reload failed, keeping previous configuration: %s", exc)
@@ -110,12 +117,23 @@ class Daemon:
         self.log.info("Starting up")
         self._config_manager = ConfigManager(self.config_dir)
         self._config_manager.load()
+        self._apply_log_level()
 
         if self.poll_interval is None:
             self.poll_interval = self._config_manager.config.daemon.poll_interval
 
         self._ipmi = IPMI()
         self._controller = self._build_controller()
+
+    def _apply_log_level(self) -> None:
+        # -v/--verbose is an explicit CLI override and always wins; only
+        # fall back to config.toml's daemon.log_level when it wasn't passed.
+        if self.verbose:
+            return
+        try:
+            set_level(self._config_manager.config.daemon.log_level)
+        except ValueError as exc:
+            self.log.warning("invalid config log_level, keeping current level: %s", exc)
 
     def _build_controller(self) -> Controller:
         vm_manager = VMManager(self._config_manager.vms)
