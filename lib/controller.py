@@ -92,7 +92,13 @@ class Controller:
             return
         _log.critical("EMERGENCY shutdown requested by policy: issuing systemctl poweroff")
         try:
-            subprocess.run(["systemctl", "poweroff"], check=True)
+            # -n: fail immediately rather than hang on a password prompt
+            # that will never come (this runs unattended).
+            # --ignore-inhibitors: a thermal emergency must not be blocked
+            # by an admin's forgotten SSH session.
+            subprocess.run(
+                ["sudo", "-n", "systemctl", "poweroff", "--ignore-inhibitors"], check=True,
+            )
         except (OSError, subprocess.CalledProcessError) as exc:
             _log.error("failed to issue host shutdown: %s", exc)
 
