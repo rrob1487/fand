@@ -15,6 +15,10 @@ The goal of this document is to define the order in which the project should be 
 
 The build order follows the dependency direction defined by the architecture. Lower-level components must be completed before higher-level orchestration components are built. Every file created in this document appears in `directory_map.md` — nothing is added beyond it except the `__init__.py` package files noted in Phase 0, which are a mechanical necessity of the directory structure `directory_map.md` already specifies, not a new component.
 
+The notification subsystem defined in `notification.md` has its own roadmap:
+`notification_build_order.md`. This document covers the fan-control daemon; that one covers
+notifications and assumes every phase here is complete.
+
 ---
 
 ## Build Philosophy

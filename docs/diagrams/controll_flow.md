@@ -15,7 +15,9 @@ E --> F[Apply Hysteresis]
 
 F --> G[Set Fan Speed]
 
-G --> H[Kick Watchdog]
+G --> H[Dispatch Notifications]
 
-H --> A
+H --> I[Kick Watchdog]
+
+I --> A
 ```

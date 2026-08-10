@@ -19,14 +19,18 @@ Welcome to the **fand** documentation.
 
 ## Documentation
 
-| Document                    | Description                                       |
-| --------------------------- | ------------------------------------------------- |
-| `architecture.md`           | Overall system architecture and design philosophy |
-| `directory_map.md`          | Description of every directory and source file    |
-| `build_order.md`            | Recommended implementation roadmap                |
-| `control_loop.md`           | One iteration of the daemon explained             |
-| `configuration.md`          | Configuration file reference                      |
-| `state_machine.md`          | Runtime operating states and transitions          |
-| `diagrams/class_diagram.md` | High-level object relationships                   |
-| `diagrams/control_flow.md`  | Runtime control flow                              |
-| `diagrams/startup.md`       | Startup sequence                                  |
+| Document                        | Description                                        |
+| ------------------------------- | -------------------------------------------------- |
+| `architecture.md`               | Overall system architecture and design philosophy  |
+| `design_principles.md`          | Description of how new code should be written      |
+| `directory_map.md`              | Description of every directory and source file     |
+| `build_order.md`                | Recommended implementation roadmap                 |
+| `notification_build_order.md`   | Notification subsystem implementation roadmap      |
+| `control_loop.md`               | One iteration of the daemon explained              |
+| `configuration.md`              | Configuration file reference                       |
+| `state_machine.md`              | Runtime operating states and transitions           |
+| `notification.md`               | Describes the functionality of notification system |
+| `diagrams/class_diagram.md`     | High-level object relationships                    |
+| `diagrams/control_flow.md`      | Runtime control flow                               |
+| `diagrams/notification_flow.md` | Notification dispatch and delivery flow            |
+| `diagrams/startup.md`           | Startup sequence                                   |
