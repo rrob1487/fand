@@ -1,0 +1,31 @@
+# Example Discord notifier. Copy to discord.toml and edit.
+# One notifier per file; the file name identifies the notifier.
+# See docs/configuration.md for the full schema.
+
+Name = "Discord Temperature Alerts"
+EndpointType = "discord"
+Enabled = true
+# Seconds between queued notifications while the trigger is satisfied.
+Interval = 60
+# Maximum pending jobs for this notifier. When full, the oldest is dropped.
+QueueSize = 10
+# Optional delivery policy; defaults shown.
+MaxAttempts = 3
+RetryBackoff = 1.0
+
+[Trigger]
+Type = "threshold"
+Temperature = 80
+# Optional. Omit to evaluate and report every available sensor.
+# Names come from the BMC ("CPU1 Temp") and from VMs ("<vm name> GPU").
+# Sensors = ["CPU1 Temp", "CPU2 Temp"]
+
+[Endpoint]
+# Optional endpoint options; defaults shown.
+Timeout = 10.0
+
+# Values are environment variable NAMES, never secrets.
+[Credentials]
+Token = "FAND_DISCORD_TOKEN"
+Server = "FAND_DISCORD_SERVER"
+Channel = "FAND_DISCORD_CHANNEL"

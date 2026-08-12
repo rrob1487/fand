@@ -49,6 +49,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Do not change hardware state",
     )
     parser.add_argument(
+        "--notify-test",
+        action="store_true",
+        help="Send one test notification per configured notifier, then exit",
+    )
+    parser.add_argument(
         "--poll-interval", type=float, default=None,
         help="Seconds between work iterations (overrides config.toml's daemon.poll_interval)",
     )
@@ -69,6 +74,8 @@ def main() -> int:
         dry_run=args.dry_run,
         verbose=args.verbose,
     )
+    if args.notify_test:
+        return daemon.run_notify_test()
     return daemon.run()
 
 

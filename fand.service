@@ -30,7 +30,11 @@ FinalKillSignal=SIGKILL
 
 WatchdogSec=60
 
-EnvironmentFile=/opt/fand/.env
+# Leading '-': a missing .env must not stop the unit. It carries only
+# notification credentials, and notifications must never be able to
+# prevent the daemon from cooling the machine. Absent means notifiers are
+# skipped with a warning, not that fan control stops.
+-EnvironmentFile=/opt/fand/.env
 WorkingDirectory=/opt/fand
 ReadWritePaths=/opt/fand /run/fand /run/qemu
 RuntimeDirectory=fand
@@ -48,7 +52,11 @@ RestrictRealtime=true
 LockPersonality=true
 #MemoryDenyWriteExecute=true
 RestrictNamespaces=true
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# AF_NETLINK is needed by glibc's getaddrinfo(): __check_pf() opens a
+# netlink socket to enumerate local addresses before returning results.
+# Without it, DNS lookups for notification endpoints can fail in ways that
+# look intermittent.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 CapabilityBoundingSet=
 SystemCallFilter=@system-service
 SystemCallErrorNumber=EPERM

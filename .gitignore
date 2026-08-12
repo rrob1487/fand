@@ -6,6 +6,9 @@ config/*
 !config/vms/
 config/vms/*
 !config/vms/*.example
+!config/notification/
+config/notification/*
+!config/notification/*.example
 logs/
 .env
 .env.local

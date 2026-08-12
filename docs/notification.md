@@ -473,6 +473,8 @@ The relevant temperature is the **hottest reading among the notifier's selected 
 
 A notifier with no readings available for its selected sensors is not active. A notifier that cannot see a temperature cannot claim a threshold was crossed.
 
+`Temperature` is expressed in degrees Celsius and must not be negative. A negative threshold would be satisfied by every reading a server sensor can produce, leaving the notifier permanently active — that is a general trigger written as a threshold, and is rejected as a configuration error.
+
 When the relevant sensor temperature reaches the threshold, the notifier becomes active.
 
 The notifier should immediately queue a notification when the threshold is first reached.
@@ -563,6 +565,8 @@ If a configured sensor is unavailable, the notification system should handle the
 An unavailable sensor is omitted, and the remaining available data is still delivered.
 
 A missing sensor is logged as a warning **once per sensor name per notifier**, not on every cycle. A misspelled entry in a `Sensors` list is a configuration mistake that persists, and repeating its warning every polling interval would bury genuine operational problems.
+
+A sensor that later becomes available again is logged and re-armed, so a sensor that disappears a second time warns again. This matches how the daemon reports a failed sensor recovering.
 
 If none of a notifier's selected sensors are available, the notification is still delivered, carrying the fan state and system state it would otherwise have carried and no sensor readings.
 
@@ -978,6 +982,7 @@ Invalid notifier configurations must not cause the fan daemon to terminate.
 Examples include:
 
 * Missing required fields.
+* Unrecognized configuration keys.
 * Invalid `EndpointType`.
 * Invalid trigger type.
 * Invalid trigger configuration.
@@ -985,6 +990,8 @@ Examples include:
 * Invalid queue size.
 * Missing required credentials.
 * Invalid endpoint-specific configuration.
+
+Unrecognized keys are treated as errors rather than ignored. A misspelled optional key would otherwise leave a notifier running with a default the operator did not choose, and nothing would be logged. Keys inside `[Endpoint]` and `[Credentials]` are exempt, since those schemas belong to the endpoint implementation.
 
 Configuration errors should be associated with the affected notifier whenever possible.
 
@@ -1198,7 +1205,7 @@ QueueSize = 100
 
 [Trigger]
 Type = "general"
-Sensors = ["CPU1 Temp", "CPU2 Temp", "GPU0 Temp"]
+Sensors = ["CPU1 Temp", "CPU2 Temp", "n8n GPU"]
 
 [Endpoint]
 Timeout = 10.0

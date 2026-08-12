@@ -10,6 +10,7 @@ from __future__ import annotations
 import subprocess
 
 from lib.hardware.ipmi import IPMIError, IPMIFanController
+from lib.managers.notification_manager import NotificationManager
 from lib.managers.sensor_manager import SensorManager
 from lib.policy import FanDecision, Policy
 from lib.state import OperatingMode, State
@@ -26,18 +27,21 @@ class Controller:
         policy: Policy,
         fan_controller: IPMIFanController,
         dry_run: bool = False,
+        notification_manager: NotificationManager | None = None,
     ) -> None:
         self._sensor_manager = sensor_manager
         self._policy = policy
         self._fan_controller = fan_controller
         self._dry_run = dry_run
+        self._notification_manager = notification_manager
         self._last_logged_speed: float | None = None
         self._last_logged_mode: OperatingMode | None = None
         self.state = State()
 
     def run_cycle(self) -> None:
         """One full control cycle: poll sensors, evaluate policy, apply
-        the resulting fan speed, and act on a shutdown request if signaled.
+        the resulting fan speed, act on a shutdown request if signaled, and
+        hand the resulting state to the notification subsystem.
         """
         self._sensor_manager.poll(self.state)
         decision = self._policy.evaluate(self.state)
@@ -45,6 +49,26 @@ class Controller:
         self._apply_fan_speed(decision.fan_speed_percent)
         if decision.shutdown_requested:
             self._shutdown_host()
+        self._dispatch_notifications()
+
+    def _dispatch_notifications(self) -> None:
+        """Hand the current state to the notification subsystem, if any.
+
+        Last in the cycle, so nothing sits between an emergency decision and
+        the shutdown that answers it. Dispatch only evaluates triggers and
+        queues jobs -- delivery happens on notifier worker threads -- so this
+        performs no I/O and cannot delay the next poll or the watchdog.
+
+        Guarded even though dispatch() already guards itself: notification is a
+        non-critical subsystem embedded in a safety loop, and it must have no
+        way to interrupt fan control.
+        """
+        if self._notification_manager is None:
+            return
+        try:
+            self._notification_manager.dispatch(self.state)
+        except Exception:
+            _log.warning("notification dispatch failed", exc_info=True)
 
     def _log_fan_decision(self, decision: FanDecision) -> None:
         """Log at INFO (visible with or without -v) only when the fan

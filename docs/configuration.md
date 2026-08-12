@@ -38,6 +38,10 @@ Notifier definitions live in `config/notification/*.toml`, one notifier per
 file. The daemon discovers them at startup and re-reads them on reload, the
 same way VM configuration files are discovered.
 
+`systemctl reload fand` takes effect within one `daemon.poll_interval`. The
+signal handler only records the request; the reload itself runs between control
+cycles, so nothing can interrupt the daemon mid-cycle.
+
 Multiple files may configure the same endpoint type. Each file is independent.
 
 The **file name is the notifier's identity**. `Name` is a human-readable label
@@ -67,7 +71,7 @@ warns when a configuration does this.
 | Key | Type | Required | Default | Notes |
 |-----|------|----------|---------|-------|
 | `Type` | string | yes | — | `threshold` or `general`. |
-| `Temperature` | number | for `threshold` | — | Degrees Celsius. Active while the hottest selected sensor is at or above this value. |
+| `Temperature` | number | for `threshold` | — | Degrees Celsius, non-negative. Active while the hottest selected sensor is at or above this value. |
 | `Sensors` | list of strings | no | all sensors | Scopes both the comparison and the payload. |
 
 `Sensors` applies to both trigger types.
@@ -87,10 +91,25 @@ Values are **environment variable names, never secret values**. The daemon
 resolves them from the environment when it builds the endpoint. Secrets live in
 `.env`, which is gitignored; `.env.example` names the variables without values.
 
-| Endpoint type | Keys |
-|---------------|------|
-| `discord` | `Token`, `Server`, `Channel` |
-| `homeassistant` | `URL`, `Token` |
+A missing `.env`, or a variable it does not define, disables the notifiers that
+need it and leaves the daemon running normally. The unit loads it with
+`-EnvironmentFile=` for exactly that reason: notification credentials must never
+be able to stop the machine being cooled.
+
+| Endpoint type | Required | Optional |
+|---------------|----------|----------|
+| `discord` | `Token`, `Channel` | `Server` |
+| `homeassistant` | `URL`, `Token` | — |
+
+Discord's `Server` is optional: the API call addresses the channel directly, so
+the value only identifies which guild a notifier targets in diagnostics.
+
+A variable that is set but empty counts as unset — an empty token is a
+misconfiguration, not a credential.
+
+Keys the endpoint does not use are rejected, in both `[Credentials]` and
+`[Endpoint]`. Those two tables are the only ones the schema does not own, so
+this is the one place a typo in them can be caught.
 
 ### Sensor Names
 
@@ -114,6 +133,15 @@ continue running.
 This differs deliberately from `config.toml` and `vms/*.toml`, where an invalid
 file is fatal at startup. A missing fan curve means the machine cannot be
 cooled. A missing notifier means a message is not sent.
+
+**Unrecognized keys are rejected**, both at the top level and inside
+`[Trigger]`. A misspelled optional key would otherwise fall back to its default
+without warning, leaving a notifier that behaves differently from what its file
+says — `MaxAttempt = 5` would quietly run with `MaxAttempts = 3`. Setting
+`Temperature` on a `general` trigger is rejected for the same reason.
+
+`[Endpoint]` and `[Credentials]` are exempt: their keys belong to the endpoint
+implementation, so they are passed through without interpretation.
 
 ### Example
 

@@ -45,11 +45,33 @@ fand/
 │       ├── retry.py
 │       ├── http.py
 │       └── logging.py
-└── docs/
-    ├── directory_map.md
-    ├── build_order.md
-    ├── notification_build_order.md
-    └── architecture.md
+├── docs/
+│   ├── directory_map.md
+│   ├── build_order.md
+│   ├── notification_build_order.md
+│   └── architecture.md
+└── tests/
+    ├── test_controller.py
+    ├── test_daemon.py
+    ├── support/
+    │   └── http_server.py
+    ├── factories/
+    │   └── test_notifier_factory.py
+    ├── managers/
+    │   ├── test_config_manager.py
+    │   └── test_notification_manager.py
+    ├── models/
+    │   └── test_notification.py
+    ├── notifications/
+    │   ├── test_notification.py
+    │   ├── test_endpoint.py
+    │   ├── test_trigger.py
+    │   ├── test_notifier.py
+    │   ├── test_discord.py
+    │   └── test_homeassistant.py
+    └── utils/
+        ├── test_http.py
+        └── test_retry.py
 ```
 
 ## Root
@@ -62,6 +84,7 @@ fand/
 | `config/` | User-editable configuration. |
 | `lib/` | Application source code. |
 | `docs/` | Project documentation. |
+| `tests/` | Test suite. |
 
 ## config/
 
@@ -165,3 +188,34 @@ Reusable helper utilities.
 | `retry.py` | Retry and backoff. |
 | `http.py` | JSON-over-HTTP transport. |
 | `logging.py` | Logging configuration. |
+
+## tests/
+
+Mirrors the `lib/` layout. Run from the repository root:
+
+```text
+python -m unittest discover
+```
+
+Stdlib `unittest` — no test dependency is required.
+
+| File | Covers |
+|------|--------|
+| `test_controller.py` | Control cycle ordering and notification isolation. |
+| `test_daemon.py` | Signal handling, notifier lifecycle, teardown ordering, --notify-test. |
+| `support/http_server.py` | Loopback HTTP server used by the transport and endpoint tests. |
+| `factories/test_notifier_factory.py` | Endpoint registry, credential resolution, notifier assembly. |
+| `managers/test_config_manager.py` | Config discovery, lenient notifier loading, atomic reload. |
+| `managers/test_notification_manager.py` | State snapshots, dispatch, reload reconciliation, self-test. |
+| `models/test_notification.py` | Notifier configuration parsing and validation. |
+| `notifications/test_notification.py` | Generic notification payload and sensor selection. |
+| `notifications/test_endpoint.py` | Endpoint interface and status classification. |
+| `notifications/test_trigger.py` | Trigger evaluation and sensor scoping. |
+| `notifications/test_notifier.py` | Scheduling, queue overflow, worker, retry, shutdown. |
+| `notifications/test_discord.py` | Discord embed construction and delivery. |
+| `notifications/test_homeassistant.py` | Home Assistant entity states and delivery. |
+| `utils/test_http.py` | JSON-over-HTTP transport, against a loopback server. |
+| `utils/test_retry.py` | Retry, backoff, and cancellation. |
+
+Endpoint tests drive a real loopback server rather than a mocked transport, so the assertions are
+made against the JSON Discord and Home Assistant would actually receive.

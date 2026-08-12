@@ -1,0 +1,25 @@
+# Example Home Assistant notifier. Copy to homeassistant.toml and edit.
+# One notifier per file; the file name identifies the notifier.
+# See docs/configuration.md for the full schema.
+
+Name = "Home Assistant Sensors"
+EndpointType = "homeassistant"
+Enabled = true
+Interval = 30
+QueueSize = 100
+
+[Trigger]
+Type = "general"
+# Omit to report every available sensor.
+# Names come from the BMC ("CPU1 Temp") and from VMs ("<vm name> GPU").
+Sensors = ["CPU1 Temp", "CPU2 Temp", "n8n GPU"]
+
+[Endpoint]
+Timeout = 10.0
+# Prefix for the entities this notifier creates, e.g. sensor.fand_cpu1_temp
+EntityPrefix = "fand"
+
+# Values are environment variable NAMES, never secrets.
+[Credentials]
+URL = "FAND_HOMEASSISTANT_URL"
+Token = "FAND_HOMEASSISTANT_TOKEN"

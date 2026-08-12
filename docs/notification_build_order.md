@@ -400,7 +400,9 @@ QueueSize = 100
 
 [Trigger]
 Type = "general"
-Sensors = ["CPU1 Temp", "CPU2 Temp", "GPU0 Temp"]
+# Omit to report every available sensor.
+# Names come from the BMC ("CPU1 Temp") and from VMs ("<vm name> GPU").
+Sensors = ["CPU1 Temp", "CPU2 Temp", "n8n GPU"]
 
 [Endpoint]
 Timeout = 10.0
@@ -483,10 +485,16 @@ key:
 | `MaxAttempts` | optional int `>= 1`, default `3` |
 | `RetryBackoff` | optional number `>= 0`, default `1.0` |
 | `[Trigger].Type` | required, one of `threshold`, `general` |
-| `[Trigger].Temperature` | required for `threshold`, number |
+| `[Trigger].Temperature` | required for `threshold`, number `>= 0` |
 | `[Trigger].Sensors` | optional list of non-empty strings; omitted means all |
 | `[Credentials]` | required table of string → string |
 | `[Endpoint]` | optional table, passed through opaquely |
+| Unknown keys | rejected at the top level and inside `[Trigger]`; `[Endpoint]` and `[Credentials]` stay opaque because the model does not own their schemas |
+
+Rejecting unknown keys deviates from `models/config.py`, which pulls only the keys it recognizes.
+It is correct here because notifier configuration is skipped rather than fatal: a mistyped
+optional key would otherwise fall back to its default silently, leaving a notifier that behaves
+differently from what its file says with nothing logged.
 
 **Credential values must match `^[A-Za-z_][A-Za-z0-9_]*$`.** A value that fails this pattern is
 almost certainly a secret pasted where a variable name belongs, so it is rejected — and the
@@ -527,34 +535,59 @@ subsystem needs.
 **Must provide:**
 
 ```python
-class HTTPTransportError(Exception):
-    status: int | None       # None for connection/DNS/TLS/timeout failures
+@dataclass(frozen=True)
+class HTTPResponse:
+    status: int
+    body: str
     retry_after: float | None
+
+class HTTPTransportError(Exception):
+    """No response was obtained: DNS, connection, TLS, or timeout."""
 
 def post_json(
     url: str,
-    payload: dict,
-    headers: Mapping[str, str],
+    payload: Mapping[str, Any],
+    headers: Mapping[str, str] | None = None,
+    *,
     timeout: float,
-) -> tuple[int, str]: ...
+) -> HTTPResponse: ...
+
+def warn_if_insecure(url: str) -> None: ...
 ```
 
-- A **mandatory** `timeout` on every request. An endpoint that accepts a connection and never
-  responds would otherwise park a worker thread forever, which is the one failure that turns a
-  bounded queue into an unbounded backlog.
+- **Every HTTP status returns normally**, including `4xx` and `5xx`. `HTTPTransportError` means
+  the exchange never completed at all. The split is "did we reach the server", not "did we like
+  the answer" — deciding that `429` is retryable and `401` is fatal is Phase 4's job, and a
+  utility module must not encode that policy.
+- A **mandatory, keyword-only** `timeout` on every request, so a caller cannot forget it. An
+  endpoint that accepts a connection and never responds would otherwise park a worker thread
+  forever, which is the one failure that turns a bounded queue into an unbounded backlog.
 - Default TLS verification (never an unverified `SSLContext`).
-- `Retry-After` parsed from the response headers when present.
-- A one-time warning per URL when the scheme is not `https`, because credentials then travel in
-  cleartext. Non-HTTPS is permitted rather than rejected: a Home Assistant instance on a trusted
-  LAN is a legitimate deployment, and refusing it would push users toward disabling verification
-  instead.
+- `Retry-After` parsed from the response headers when present, in both the delta-seconds and
+  HTTP-date forms. A malformed value is ignored rather than fatal.
+- **Redirects refused.** `urllib` follows them by default and re-sends request headers to the new
+  location, so a `302` from an `https` endpoint to an `http` one would hand the `Authorization`
+  header to the redirect target in cleartext. API endpoints have no legitimate reason to redirect;
+  a `3xx` is returned to the caller as an ordinary response.
+- Request construction happens **inside** the error handling. `urllib.request.Request` raises
+  `ValueError` on an unusable URL, and an operator's typo in an endpoint URL must surface as a
+  transport failure the caller already handles rather than as a stray exception.
+- `warn_if_insecure(url)` warns when a URL would send credentials in cleartext. It is
+  **stateless**: it keeps no record of what it has already warned about, because
+  `design_principles.md` requires utility modules to hold no state. Callers control the frequency
+  — Phase 4's endpoints call it once when they are constructed, which also re-announces after a
+  reload rebuilds them. Non-HTTPS is permitted rather than rejected: a Home Assistant instance on
+  a trusted LAN is a legitimate deployment, and refusing it would push operators toward disabling
+  certificate verification instead, which is strictly worse.
 
 **Must NOT do:**
 
 - Know what a notification is.
 - Retry. Retry policy belongs to the notifier, which is the component that knows how many
   attempts the configuration allows.
-- Log request bodies or header values.
+- Judge which statuses are errors.
+- Log request bodies or header values. Error messages carry `scheme://host` only, since an
+  endpoint URL can hold a token in its path.
 
 ### `lib/utils/retry.py` *(extension)*
 
@@ -570,12 +603,25 @@ def retry(
     backoff: float = 1.0,
     backoff_multiplier: float = 2.0,
     max_backoff: float | None = None,
-    cancel_event: "threading.Event | None" = None,   # new
+    cancel_event: "threading.Event | None" = None,          # new
+    delay_override: "Callable[[BaseException], float | None] | None" = None,   # new
 ): ...
 ```
 
+`delay_override` lets the raised exception dictate its own wait, which is what Phase 6 needs to
+honour an HTTP `429`'s `Retry-After`. It stays generic — the decorator asks a callable and learns
+nothing about endpoints — and its result is still clamped by `max_backoff`. The exponential
+sequence advances independently, so one server-supplied delay does not reset the ramp.
+
 When `cancel_event` is supplied, backoff waits with `cancel_event.wait(delay)` instead of
-`time.sleep(delay)`, and abandons the remaining attempts if the event is set.
+`time.sleep(delay)`, and abandons the remaining attempts if the event is set, raising the last
+exception as it would after exhausting them.
+
+An already-set event is checked **before** the "retrying in Ns" log line, so the daemon never
+announces a retry it is about to abandon.
+
+Attempts themselves are never skipped — only the waits between them. A single attempt is already
+bounded by its own timeout, and a notification worker checks its stop event before dequeuing.
 
 **Failure mode this addresses:** a worker parked inside `time.sleep()` cannot observe a shutdown
 request. On `SIGTERM` the daemon would then either wait out the full backoff or abandon the
@@ -589,10 +635,14 @@ attempt immediately and let teardown proceed.
 
 ### Phase Completion Criteria
 
-- `post_json` returns a status and body for a reachable endpoint, and raises `HTTPTransportError`
-  for DNS failure, connection refusal, TLS failure, and timeout.
+- `post_json` returns an `HTTPResponse` for every status a reachable endpoint produces —
+  `2xx`, `4xx`, `5xx`, and `3xx` alike — and raises `HTTPTransportError` only for connection
+  refusal, timeout, TLS failure, and an unusable URL.
+- `Retry-After` is parsed in both forms, and an unparsable value yields `None` rather than an
+  error.
 - The existing retry call sites are unmodified and behave identically.
-- A `retry`-wrapped call with a set `cancel_event` returns without sleeping.
+- A `retry`-wrapped call with a set `cancel_event` abandons its remaining attempts without
+  sleeping, and still raises the last exception.
 
 ---
 
@@ -628,10 +678,22 @@ class Notification:
     last_command_ok: bool | None
 
     def with_sensors(self, names: tuple[str, ...] | None) -> "Notification": ...
+
+    @property
+    def sensor_names(self) -> tuple[str, ...]: ...
+    @property
+    def hottest(self) -> SensorReading | None: ...
 ```
 
 `with_sensors(None)` returns `self`; otherwise it returns a copy filtered to the named sensors,
-preserving the configured order and silently omitting names that are absent (the caller warns).
+preserving the configured order and silently omitting names that are absent. The **notifier**
+reports the gap, by diffing its configured list against `sensor_names` — that keeps this a pure
+data type rather than one that has to describe its own shortfalls.
+
+`hottest` is a `max` over the readings, or `None` when there are none. It earns its place because
+both the Discord headline and Phase 5's `ThresholdTrigger` need it, and neither should re-derive
+it. It is a derived view of an immutable value object, not a decision — unlike `State`, which is
+mutable and is deliberately kept free of evaluation.
 
 **Must NOT do:**
 
@@ -664,6 +726,8 @@ class NotificationEndpoint(ABC):
 
     @abstractmethod
     def send(self, notification: Notification) -> None: ...
+
+def raise_for_http_status(status: int, retry_after: float | None, context: str) -> None: ...
 ```
 
 **Why the transient/permanent split exists:** a rejected bearer token fails identically on every
@@ -671,9 +735,15 @@ attempt. Without the distinction, a single typo in a token burns the full retry 
 its backoff sleeps — for every job, forever. Permanent failures are logged once per job and the
 job is discarded.
 
+`raise_for_http_status` holds the classification table both HTTP endpoints share, so it is
+written once. It takes **primitives rather than an `HTTPResponse`**, so this module imports
+nothing from `utils/http.py` — an endpoint that writes a file or a Unix socket fits the same
+interface and simply never calls it.
+
 **Must NOT do:**
 
 - Know about configuration files, environment variables, or `State`.
+- Import a transport. The interface is transport-agnostic.
 
 ### `lib/notifications/discord.py`
 
@@ -690,14 +760,27 @@ class DiscordEndpoint(NotificationEndpoint):
         token: str,
         channel_id: str,
         server_id: str | None = None,
+        base_url: str = "https://discord.com",
         timeout: float = 10.0,
     ) -> None: ...
 ```
 
-- `POST https://discord.com/api/v10/channels/{channel_id}/messages` with
+- `POST {base_url}/api/v10/channels/{channel_id}/messages` with
   `Authorization: Bot <token>`, per `notification.md`'s credential schema.
-- Formats the generic notification into human-readable message content — this is a
-  human-facing messaging service, so the payload is a short summary, not a data dump.
+- **A rich embed, colour-coded by operating mode** — green `RUNNING`, amber `WARNING`, red
+  `EMERGENCY`, grey otherwise — with the hottest sensor as the headline, fan speed and mode as
+  inline fields, the remaining readings in a code block, alarms when present, and an ISO-8601
+  timestamp Discord renders in each viewer's local time. This is a human-facing service, so the
+  message is a summary readable at a glance rather than a data dump.
+- **The sensor block is truncated before sending.** Discord rejects a field value over 1024
+  characters with a `400`, which the classifier treats as permanent — so an unbounded list would
+  silently discard every notification from a machine with enough sensors. Excess rows collapse
+  into a `... +N more` line.
+- `base_url` is a constructor parameter rather than a constant: it gives tests a seam to point at
+  a loopback server without patching module privates, and it lets `warn_if_insecure` apply to both
+  endpoints uniformly. The default is https, and Phase 7 does not expose it in `[Endpoint]`.
+- `warn_if_insecure(base_url)` is called at construction, which is what gives the Phase 3 check
+  its "once per notifier, and again after a reload rebuilds it" cadence.
 - Status classification:
 
 | Response | Classification |
@@ -742,9 +825,18 @@ class HomeAssistantEndpoint(NotificationEndpoint):
   notifier reports the fan state and system state the generic payload carries.
 - `slug` is the sensor name lowercased with every non-alphanumeric run collapsed to a single
   underscore, so `"CPU1 Temp"` → `sensor.fand_cpu1_temp` and `"Temp #2"` → `sensor.fand_temp_2`.
+  `entity_prefix` is slugified the same way, falling back to `fand` if nothing survives.
+- **Slug collisions are detected and logged.** `"CPU1 Temp"` and `"CPU1-Temp"` both reduce to
+  `cpu1_temp`; without a check the second would overwrite the first in Home Assistant with nothing
+  recorded. The first reading wins and the collision warns.
+- **Every request is attempted**, rather than stopping at the first failure. `/api/states` is
+  idempotent, so re-sending on a retry is harmless, and attempting all of them means one bad
+  entity does not cost the rest of the data.
 - The same status classification table as Discord. If any request within one job fails
   transiently, the whole job is transient; a permanent failure on any request fails the job
-  permanently.
+  permanently, since retrying a job containing one can never fully succeed.
+- `warn_if_insecure(base_url)` at construction. This is the endpoint where it matters: the URL
+  comes from operator configuration, unlike Discord's fixed API host.
 
 **Must NOT do:**
 
@@ -795,6 +887,12 @@ class GeneralTrigger(Trigger):
   threshold was crossed.
 - `GeneralTrigger.is_active` returns `True` unconditionally, which is what makes the interval
   scheduling in Phase 6 a single code path for both trigger types.
+- **`is_active` applies its own sensor selection**, calling `with_sensors(self.sensor_names)` on
+  the snapshot it is given rather than requiring the caller to have scoped it first. Phase 6
+  filters again to build the payload; that double filter is deliberate. An implicit
+  "pass me a pre-scoped notification" precondition would fail *silently* if a future caller got
+  it wrong — a threshold notifier firing on a sensor it was configured to ignore, with no error
+  anywhere. `with_sensors(None)` returns the snapshot unchanged, so the unscoped case is free.
 
 **Must NOT do:**
 
@@ -836,10 +934,14 @@ class Notifier:
     ) -> None: ...
 
     def start(self) -> None: ...
+    def request_stop(self) -> None: ...
     def stop(self, timeout: float) -> None: ...
     def offer(self, notification: Notification) -> None: ...
     def deliver_now(self, notification: Notification) -> None: ...   # --notify-test only
 ```
+
+`request_stop()` signals without joining, so an owner of several notifiers can signal them all
+before waiting on any. `stop()` is `request_stop()` plus a bounded join.
 
 #### Scheduling — runs on the controller thread, performs no I/O
 
@@ -881,8 +983,9 @@ successful deliveries."
 #### Worker
 
 - `threading.Thread(target=..., daemon=True, name=f"notifier-{name}")`.
-- Loop: `queue.get(timeout=...)` inside a `while not stop_event.is_set()` guard, with `Empty`
-  simply continuing.
+- Loop: `queue.get(timeout=_QUEUE_POLL_SECONDS)` inside a `while not stop_event.is_set()` guard,
+  with `Empty` simply continuing. The 0.5 s poll bounds how long `stop()` blocks on an idle
+  worker; it governs shutdown responsiveness only, so no behaviour depends on its value.
 - **Shutdown uses the stop event, never a sentinel value in the queue.** Putting a sentinel into
   a full queue blocks — and a full queue is precisely the state a wedged endpoint produces, so
   the sentinel approach deadlocks exactly when shutdown matters most.
@@ -897,7 +1000,11 @@ successful deliveries."
   capped by a module constant (`_MAX_RETRY_BACKOFF_SECONDS = 30.0`) so a misconfigured value
   cannot produce an unbounded sleep.
 - Only `TransientEndpointError` is retried; `TransientEndpointError.retry_after` overrides the
-  computed backoff, still subject to the cap.
+  computed backoff, still subject to the cap. This is `utils/retry.py`'s `delay_override` hook,
+  wired as `lambda exc: exc.retry_after` — the notifier reuses the shared backoff, cap, and
+  cancellation logic rather than reimplementing it.
+- The retried callable's `__qualname__` is set to name the notifier, so retry's per-attempt
+  warning says *which* notifier is failing instead of reporting an anonymous bound method.
 - `PermanentEndpointError` discards the job on the first failure.
 - Backoff waits are cancellable via the Phase 3 `cancel_event`, wired to the notifier's stop event.
 - Attempts exhausted → discard the job, log a warning, continue with the next job. The notifier
@@ -909,6 +1016,10 @@ When `dry_run` is set, the notifier evaluates triggers, applies interval schedul
 it would have sent — but never calls `endpoint.send()`. This mirrors `Controller._apply_fan_speed`
 (`controller.py:76-80`): a dry run must not produce external side effects, and a real Discord
 message is very much an external side effect.
+
+`deliver_now` honours dry run too. `--dry-run` promises nothing outside the process changes, and
+that promise should not depend on which path reaches the endpoint. Phase 11 reports such a
+notifier as skipped rather than passed.
 
 #### Logging
 
@@ -931,6 +1042,9 @@ A configured sensor absent from the snapshot is omitted and the remaining data i
 sensor name per notifier**, using the same seen-set pattern as
 `SensorManager._failed_sensors` (`sensor_manager.py:39-47`) — otherwise a typo in a `Sensors`
 list produces a warning on every poll interval forever.
+
+A name that later reappears logs a recovery at INFO and is re-armed, matching how `SensorManager`
+reports a sensor coming back. Without it, half of a VM restart goes unrecorded.
 
 **Must NOT do:**
 
@@ -958,11 +1072,13 @@ list produces a warning on every poll interval forever.
 **Must provide:**
 
 ```python
-ENDPOINT_TYPES: dict[str, type[NotificationEndpoint]] = {
-    "discord": DiscordEndpoint,
-    "homeassistant": HomeAssistantEndpoint,
+ENDPOINT_BUILDERS: dict[str, Callable[..., NotificationEndpoint]] = {
+    "discord": _build_discord,
+    "homeassistant": _build_homeassistant,
 }
 
+def create_endpoint(config: NotifierConfig) -> NotificationEndpoint: ...
+def create_trigger(config: TriggerConfig) -> Trigger: ...
 def create_notifier(config: NotifierConfig, dry_run: bool = False) -> Notifier: ...
 ```
 
@@ -971,10 +1087,25 @@ def create_notifier(config: NotifierConfig, dry_run: bool = False) -> Notifier: 
 - Builds the endpoint from resolved credentials plus `[Endpoint]` options.
 - Returns a `Notifier` — not started; lifecycle belongs to the manager.
 
-**Error handling** — a missing environment variable, an unknown `EndpointType`, or an endpoint
-option of the wrong type raises `NotifierConfigError` naming the endpoint type and the
-**variable name**. The variable's value is never included in the message, because that message
-is going to a log.
+The registry maps to **builder functions rather than classes**, because each service needs
+different credentials and options and so has a different constructor signature. A builder keeps
+each endpoint's requirements in plain Python, so one with an unusual need does not force the
+registry to grow a declarative mini-language. Trigger construction uses the same shape, keyed by
+the *configuration class* rather than a type string, so `"threshold"` and `"general"` appear in
+exactly one place — the model that parses them.
+
+**Error handling** — a missing or empty environment variable, an unknown `EndpointType`, a missing
+or unrecognised credential key, or an endpoint option of the wrong type raises
+`NotifierConfigError` naming the endpoint type, the configuration key, and the **variable name**.
+The variable's *value* is never included, because that message is going to a log.
+
+- An environment variable that exists but is empty is treated as unset. An empty token is a
+  misconfiguration, not a credential.
+- **Unknown keys in `[Credentials]` and `[Endpoint]` are rejected.** The model passes both tables
+  through opaquely because their schemas belong to the endpoint, which makes the factory the first
+  thing able to catch `Timout = 5` or a credential key the endpoint never reads.
+- Discord's `Server` is accepted but **not required**: the REST call addresses the channel
+  directly, and the value only identifies the guild in diagnostics.
 
 **Must NOT do:**
 
@@ -982,8 +1113,8 @@ is going to a log.
 - Start threads.
 
 This mirrors `factories/sensor_factory.py` exactly. Adding an endpoint type requires: a new module
-in `lib/notifications/`, one `ENDPOINT_TYPES` entry, and a configuration file — with no change to
-the manager, controller, daemon, or fan-control code.
+in `lib/notifications/`, a builder function, one `ENDPOINT_BUILDERS` entry, and a configuration
+file — with no change to the manager, controller, daemon, or fan-control code.
 
 ### Phase Completion Criteria
 
@@ -1020,6 +1151,21 @@ reload reconciliation in Phase 9. Two files may legitimately carry the same `Nam
 core config.** A notifier file that fails to parse or validate is logged as a warning and
 skipped; `load()` still succeeds and every other notifier still loads. `config.toml` and
 `vms/*.toml` keep raising `ConfigError`.
+
+Three exception types are caught per file: `ConfigError` (unparsable TOML), `NotifierConfigError`
+(failed validation), and `OSError` — one unreadable file must not stop the daemon starting.
+
+**The `Interval` warning lives here.** `load()` reads `config.toml` before discovering notifiers,
+making this the first point that can see both `daemon.poll_interval` and a notifier's `Interval`.
+A notifier asking for less than the poll interval is warned about and still loaded: dispatch
+happens on the control loop, so it simply runs at the poll cadence.
+
+**`load()` is atomic.** It builds config, VMs, and notifiers into locals and assigns them at the
+end, so a failure changes nothing. Previously it assigned as it went, so a failure in
+`_discover_vms()` left the new `config` in place alongside the old `vms` — and
+`Daemon.reload_config`'s "keeping previous configuration" (`daemon.py:110`) was not true. With a
+third field that gets worse: a failed reload could advance the fan configuration while stranding
+the notifier set.
 
 **Why the asymmetry:** a missing fan curve means the daemon cannot cool the machine and must fail
 loudly at startup. A missing notifier means a message does not get sent. `notification.md`
@@ -1072,8 +1218,21 @@ class NotificationManager:
 4. Wrap each notifier's `offer()` individually, so one misbehaving notifier cannot affect
    another — the same isolation `SensorManager.poll` gives sensors (`sensor_manager.py:35-50`).
 
-The snapshot is built lazily, only when at least one notifier is due, so a system with only
-long-interval notifiers pays nothing on most cycles.
+`dispatch` returns immediately when no notifier is active, so a daemon with nothing configured
+pays nothing. It cannot skip the snapshot any more cleverly than that: whether a notifier is due
+depends on its trigger, and evaluating a trigger requires the snapshot the check would be trying
+to avoid building.
+
+**Readings and alarms are sorted by name.** `state.alarms` is a `set`, whose iteration order is
+not stable between runs, and a sensor that fails and later recovers is re-inserted at the end of
+`state.temperatures`, so insertion order drifts. Sorting keeps identical inputs producing
+identical output, per `CLAUDE.md`'s predictability requirement. Scoped notifiers are unaffected —
+`with_sensors` already reorders to the configured order.
+
+**Disabled notifiers are not constructed at all**: no endpoint, no credential resolution, no
+thread. `notification.md` requires that a disabled notifier "must not generate or deliver
+notification jobs", and never building it is the most direct reading. Setting `Enabled = false`
+therefore retires a notifier through exactly the same path as deleting its file.
 
 `State` → `Notification` conversion lives here, not in `lib/notifications/`, because it is the
 only point in the design that legitimately sees both. Putting it lower would force the I/O layer
@@ -1099,8 +1258,15 @@ explicitly exclude guaranteed delivery and persistent queues.
 
 #### `stop(timeout)`
 
-Signals every stop event, then joins each worker with a **bounded** timeout. Workers are daemon
-threads, so a worker that does not return within the timeout is abandoned rather than waited on.
+Signals every stop event, then joins each worker against a **single shared deadline**, so the
+whole shutdown is bounded by one `timeout` regardless of how many notifiers there are. Workers
+that do not return by the deadline are abandoned rather than waited on — they are daemon threads
+and cannot hold the process open.
+
+Signalling first is necessary but not sufficient: a worker blocked *inside* an endpoint call
+cannot observe its stop event, so per-notifier timeouts would still cost `N x timeout`. That time
+is spent in `Daemon.teardown()`, delaying the point at which fan control returns to iDRAC, which
+is why the deadline is shared rather than per-worker.
 
 **Must NOT do:**
 
@@ -1146,6 +1312,16 @@ threads, so a worker that does not return within the timeout is abandoned rather
 **Why dispatch comes after the fan speed is applied:** the notification then reports the state
 that was actually acted upon, including `last_command_result`. It also guarantees that no
 notification work can sit between a decision and its execution.
+
+**And after the shutdown request, not before it.** Dispatch is the last statement in `run_cycle`,
+so on an emergency cycle nothing at all sits between the decision and `systemctl poweroff`. The
+alternative — dispatching before the shutdown branch — would only delay it by a queue write, but
+"only a little" is a worse invariant than "not at all" in a safety loop, and a future reader
+should not have to weigh it.
+
+Nothing is lost by the ordering: `_shutdown_host()` does not mutate `state`, so the snapshot is
+identical either way, and `systemctl poweroff` returns as soon as systemd accepts the job, so a
+notification queued just after it has the same shutdown window as one queued just before.
 
 **Why it is still wrapped despite the manager's own guards:** `CLAUDE.md` requires that one
 misbehaving component never blocks the poll loop or delays a critical-temp response elsewhere.
@@ -1200,6 +1376,21 @@ performs the reload between cycles, in the same place it already checks `_shutdo
 This is a latent defect today, not one the notification work introduces — but the notification
 work is what makes it likely enough to matter, so it is fixed here.
 
+**`SIGTERM`/`SIGINT` has the identical defect and is fixed in the same pass.**
+`_handle_shutdown_signal` also logs. If that lands while the logging lock is held, the daemon
+never observes the shutdown request at all: systemd escalates to `SIGKILL` after
+`TimeoutStopSec`, `teardown()` never runs, and fan control is never released cleanly — only
+`ExecStopPost` saves the machine. Both handlers are reduced to setting a flag and returning, and
+both log lines move into `run()`, where the flags are read.
+
+Phase 11 is what makes both likely: notifier workers log on every delivery, retry, and drop, so
+the logging lock is now held a large fraction of the time, on threads the main thread does not
+coordinate with.
+
+**Accepted trade-off:** reload is no longer immediate. `run()` checks the flag between cycles, so
+`systemctl reload` takes effect within one `poll_interval` rather than instantly. Correctness over
+latency, and reload is not latency-sensitive.
+
 #### `reload_config()`
 
 After `self._config_manager.reload()` succeeds, call
@@ -1244,6 +1435,19 @@ delivers one synthetic notification per enabled notifier synchronously via
 `NotificationManager.self_test()`, logs one line per notifier, and returns `0` when all succeed
 and `1` otherwise. It never enters the control loop and never touches fan hardware.
 
+Exit codes distinguish three cases, because an operator scripting this needs the code to mean
+something:
+
+| Situation | Result |
+|---|---|
+| No enabled notifiers configured | warning, exit `0` — nothing failed |
+| A notifier could not be built (missing credential, unknown endpoint type) | counted as a failure, exit `1` |
+| Every notifier delivered | exit `0` |
+
+A notifier that could not be constructed is deliberately **not** silently absent from the report.
+The manager already logs why it was skipped, but reporting a pass for a notifier that never ran
+would defeat the point of asking for a test.
+
 ### `fand.py`
 
 **Must provide:**
@@ -1274,22 +1478,89 @@ mechanism is required.
 
 ### `fand.service`
 
-**No change is required.** Verify and record why:
+Most of what the subsystem needs was already in place:
 
 | Requirement | Already satisfied by |
 |---|---|
-| Outbound HTTPS | `RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6` |
-| Worker threads | `SystemCallFilter=@system-service` |
+| Outbound sockets | `RestrictAddressFamilies=` already listed `AF_INET`/`AF_INET6` |
+| No egress filtering | no `IPAddressDeny=`, no `PrivateNetwork=` |
+| Worker threads | `SystemCallFilter=@system-service` includes `@network-io` |
+| No privilege needed | outbound TCP to a high port needs no capability |
 | Reload trigger | `ExecReload=/bin/kill -HUP $MAINPID` |
-| Credentials | `EnvironmentFile=/opt/fand/.env` |
-| Network availability at start | `After=/Wants=network-online.target` |
+| Network availability at start | `After=`/`Wants=network-online.target` |
 | Fan release backstop | `ExecStopPost=/usr/bin/ipmitool raw 0x30 0x30 0x01 0x01` |
 
-**Optional hardening to note, not to apply blindly:** `IPAddressAllow`/`IPAddressDeny` can
-restrict egress to the Home Assistant host and Discord. This is worth documenting but is
-deployment-specific and would break Discord on any address change.
+**Two changes are required, though.**
+
+#### `AF_NETLINK` for name resolution
+
+`DiscordEndpoint` targets `https://discord.com`, so delivery needs DNS. glibc's `getaddrinfo()`
+calls `__check_pf()`, which opens an **`AF_NETLINK`** socket to enumerate local addresses before
+deciding whether to return IPv6 results. That family was not in the allow-list, so the call
+returned `EPERM` (per `SystemCallErrorNumber`).
+
+glibc is meant to degrade gracefully when that fails, and usually does — which is why this
+presents as intermittent DNS failure rather than an obvious breakage. Adding `AF_NETLINK` costs
+nothing and removes the ambiguity. The runtime checklist verifies resolution from inside the
+sandbox, because it cannot be tested off the target host.
+
+#### `-EnvironmentFile=` so a missing `.env` cannot stop fan control
+
+`EnvironmentFile=` without a leading `-` makes systemd **refuse to start the unit** when the file
+is absent. `/opt/fand/.env` exists only to carry notification credentials.
+
+So before this change, a missing or mistyped notification credentials file stopped the fan-control
+daemon from starting at all — the exact coupling this entire subsystem is designed to prevent.
+With the `-` prefix, an absent `.env` means notifiers are skipped with a logged warning and the
+fans are controlled normally.
+
+This defect predates the notification work; the subsystem is what made it consequential.
+
+**Optional hardening, deliberately not applied:** `IPAddressAllow`/`IPAddressDeny` can restrict
+egress to the Home Assistant host and Discord. Left out because Discord's address ranges change
+without notice and the failure mode is a notifier that silently stops working. Worth adding in a
+deployment that pins its own endpoints.
 
 ### Verification Checklist
+
+Split by what can be proved off the target host and what cannot. Anything needing systemd,
+`ipmitool`, or a real endpoint belongs in the second list and must not be reported as done until
+it has actually been run on the machine.
+
+#### Covered by the automated suite
+
+These are asserted by `python -m unittest discover` and need no hardware:
+
+- Both example configuration files parse and build through the factory.
+- A malformed or invalid notifier file is skipped with one warning; the others load.
+- An unset or empty environment variable is reported by name, with no secret in the message.
+- A `[Credentials]` value that is not a variable name is rejected without logging it.
+- Threshold rising edge, interval scheduling, re-arming, and sensor scoping.
+- Queue overflow drops the oldest and warns; queue depth never exceeds capacity.
+- Transient failures retry to `MaxAttempts`; permanent ones discard after one attempt.
+- Reload reconciliation: added, removed, edited, and untouched — the untouched notifier keeps
+  its worker and queued jobs.
+- Teardown releases fan control before stopping notifiers, and each side still runs when the
+  other raises.
+- Signal handlers only set flags and emit no log records.
+- `stop()` is bounded by one timeout regardless of how many notifiers are wedged.
+- `--notify-test` exit codes for success, delivery failure, and unbuildable notifier.
+
+#### Requires the physical host
+
+- `systemctl start fand`: `READY=1`, watchdog heartbeat continues with notifications active.
+- **DNS resolution from inside the sandbox** — the `AF_NETLINK` addition above. Confirm a Discord
+  delivery actually resolves; this is the one change that cannot be tested off-target.
+- A missing `/opt/fand/.env` starts the daemon normally with notifiers skipped, rather than
+  failing the unit.
+- `systemctl reload fand` with a file added, removed, edited, and untouched.
+- `systemctl stop fand` with an unreachable endpoint: fans return to iDRAC automatic control
+  within `TimeoutStopSec`.
+- A real threshold crossing produces a colour-coded Discord embed and Home Assistant entities.
+- `--dry-run` produces log output and zero network traffic (confirm with `ss`/`tcpdump`).
+- Sustained endpoint failure: bounded memory and bounded thread CPU over hours.
+
+#### Detail
 
 **Configuration**
 
@@ -1386,8 +1657,21 @@ must not be able to terminate the daemon.
 
 ## Testing Strategy
 
+Tests live in `tests/`, mirroring the `lib/` layout, and run with stdlib `unittest`:
+
+```
+python -m unittest discover
+```
+
+`unittest` rather than `pytest` keeps the project dependency-free, per `CLAUDE.md`'s stdlib
+preference. The suite was introduced in Phase 2, which is the first module that is pure logic with
+no I/O to stub.
+
 Consistent with `build_order.md`'s testing section, each layer must be verifiable in isolation:
 
+- **Models** — validation rules, defaults, equality, and immutability, with no fixtures beyond a
+  dict. The example configuration files are parsed as part of the suite so a schema change that
+  breaks them fails a test rather than an operator's deployment.
 - **Endpoints** — substitutable transport, so status-code classification is testable without a
   network.
 - **Triggers** — pure functions of a `Notification`; no clock, no I/O.
