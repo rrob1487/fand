@@ -93,7 +93,7 @@ resolves them from the environment when it builds the endpoint. Secrets live in
 
 A missing `.env`, or a variable it does not define, disables the notifiers that
 need it and leaves the daemon running normally. The unit loads it with
-`-EnvironmentFile=` for exactly that reason: notification credentials must never
+`EnvironmentFile=-` for exactly that reason: notification credentials must never
 be able to stop the machine being cooled.
 
 | Endpoint type | Required | Optional |

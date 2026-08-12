@@ -34,7 +34,7 @@ WatchdogSec=60
 # notification credentials, and notifications must never be able to
 # prevent the daemon from cooling the machine. Absent means notifiers are
 # skipped with a warning, not that fan control stops.
--EnvironmentFile=/opt/fand/.env
+EnvironmentFile=-/opt/fand/.env
 WorkingDirectory=/opt/fand
 ReadWritePaths=/opt/fand /run/fand /run/qemu
 RuntimeDirectory=fand

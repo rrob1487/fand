@@ -1504,14 +1504,24 @@ presents as intermittent DNS failure rather than an obvious breakage. Adding `AF
 nothing and removes the ambiguity. The runtime checklist verifies resolution from inside the
 sandbox, because it cannot be tested off the target host.
 
-#### `-EnvironmentFile=` so a missing `.env` cannot stop fan control
+#### `EnvironmentFile=-` so a missing `.env` cannot stop fan control
 
-`EnvironmentFile=` without a leading `-` makes systemd **refuse to start the unit** when the file
-is absent. `/opt/fand/.env` exists only to carry notification credentials.
+`EnvironmentFile=` without a leading `-` on **the value** makes systemd **refuse to start the
+unit** when the file is absent. `/opt/fand/.env` exists only to carry notification credentials.
+
+The prefix goes before the path, not before the key:
+
+```
+EnvironmentFile=-/opt/fand/.env     # correct
+-EnvironmentFile=/opt/fand/.env     # wrong: systemd logs "Unknown key" and IGNORES the line,
+                                    # silently loading no environment at all
+```
+
+`systemd-analyze verify fand.service` catches the wrong form.
 
 So before this change, a missing or mistyped notification credentials file stopped the fan-control
 daemon from starting at all — the exact coupling this entire subsystem is designed to prevent.
-With the `-` prefix, an absent `.env` means notifiers are skipped with a logged warning and the
+With the `-` prefix on the path, an absent `.env` means notifiers are skipped with a logged warning and the
 fans are controlled normally.
 
 This defect predates the notification work; the subsystem is what made it consequential.
