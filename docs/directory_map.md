@@ -51,17 +51,30 @@ fand/
 │   ├── notification_build_order.md
 │   └── architecture.md
 └── tests/
+    ├── test_fand.py
     ├── test_controller.py
     ├── test_daemon.py
+    ├── test_policy.py
+    ├── test_state.py
     ├── support/
-    │   └── http_server.py
+    │   ├── http_server.py
+    │   └── qga_server.py
     ├── factories/
-    │   └── test_notifier_factory.py
+    │   ├── test_notifier_factory.py
+    │   └── test_sensor_factory.py
+    ├── hardware/
+    │   ├── test_ipmi.py
+    │   ├── test_gpu.py
+    │   └── test_sensor.py
     ├── managers/
     │   ├── test_config_manager.py
-    │   └── test_notification_manager.py
+    │   ├── test_notification_manager.py
+    │   ├── test_sensor_manager.py
+    │   └── test_vm_manager.py
     ├── models/
-    │   └── test_notification.py
+    │   ├── test_config.py
+    │   ├── test_notification.py
+    │   └── test_vm.py
     ├── notifications/
     │   ├── test_notification.py
     │   ├── test_endpoint.py
@@ -71,6 +84,8 @@ fand/
     │   └── test_homeassistant.py
     └── utils/
         ├── test_http.py
+        ├── test_logging.py
+        ├── test_qga.py
         └── test_retry.py
 ```
 
@@ -201,13 +216,25 @@ Stdlib `unittest` — no test dependency is required.
 
 | File | Covers |
 |------|--------|
-| `test_controller.py` | Control cycle ordering and notification isolation. |
-| `test_daemon.py` | Signal handling, notifier lifecycle, teardown ordering, --notify-test. |
+| `test_fand.py` | Argument parsing, env-file loading, `main()` dispatch. |
+| `test_controller.py` | Control cycle ordering, fan-speed application and retry, fan-control release, emergency shutdown, notification isolation. |
+| `test_daemon.py` | Signal handling and registration, sd_notify, watchdog cadence, the main loop, notifier lifecycle, teardown ordering, --notify-test. |
+| `test_policy.py` | Fan curve interpolation, mode selection, emergency latch, hysteresis, determinism. |
+| `test_state.py` | Runtime state setters, alarms, timestamps, and its no-evaluation rule. |
 | `support/http_server.py` | Loopback HTTP server used by the transport and endpoint tests. |
+| `support/qga_server.py` | Loopback QEMU Guest Agent over a real UNIX socket. POSIX only. |
 | `factories/test_notifier_factory.py` | Endpoint registry, credential resolution, notifier assembly. |
+| `factories/test_sensor_factory.py` | GPU sensor wiring and IPMI sensor discovery. |
+| `hardware/test_ipmi.py` | Sensor-table parsing, ipmitool invocation and failures, Dell raw fan-control bytes. |
+| `hardware/test_gpu.py` | nvidia-smi request shape, output parsing, and read failures. |
+| `hardware/test_sensor.py` | The Sensor interface both implementations must satisfy. |
 | `managers/test_config_manager.py` | Config discovery, lenient notifier loading, atomic reload. |
 | `managers/test_notification_manager.py` | State snapshots, dispatch, reload reconciliation, self-test. |
+| `managers/test_sensor_manager.py` | Sensor discovery, polling, failure isolation, warn-once reporting. |
+| `managers/test_vm_manager.py` | Per-VM guest-agent clients and iteration. |
+| `models/test_config.py` | Daemon configuration parsing, defaults, and the shipped example. |
 | `models/test_notification.py` | Notifier configuration parsing and validation. |
+| `models/test_vm.py` | VM configuration parsing and the shipped example. |
 | `notifications/test_notification.py` | Generic notification payload and sensor selection. |
 | `notifications/test_endpoint.py` | Endpoint interface and status classification. |
 | `notifications/test_trigger.py` | Trigger evaluation and sensor scoping. |
@@ -215,7 +242,17 @@ Stdlib `unittest` — no test dependency is required.
 | `notifications/test_discord.py` | Discord embed construction and delivery. |
 | `notifications/test_homeassistant.py` | Home Assistant entity states and delivery. |
 | `utils/test_http.py` | JSON-over-HTTP transport, against a loopback server. |
+| `utils/test_logging.py` | Logging configuration and level changes. |
+| `utils/test_qga.py` | Guest-agent protocol, exec polling, and the socket itself. |
 | `utils/test_retry.py` | Retry, backoff, and cancellation. |
 
 Endpoint tests drive a real loopback server rather than a mocked transport, so the assertions are
-made against the JSON Discord and Home Assistant would actually receive.
+made against the JSON Discord and Home Assistant would actually receive. The guest-agent tests do
+the same over a real UNIX socket.
+
+No test invokes `ipmitool`, `sudo`, or `systemctl`, and none reaches the network: `subprocess.run`
+is replaced by a recorder, so the emergency poweroff command is asserted rather than executed.
+
+A small number of tests need `AF_UNIX` or `SIGHUP` and are guarded with `skipUnless`, so they run on
+the target host and skip on a Windows development machine. Everything they leave uncovered locally
+is still exercised there by other means, and a run on the target should report no skips at all.
