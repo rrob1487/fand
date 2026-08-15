@@ -20,6 +20,10 @@ from lib.state import State
 
 _LOGGER = "lib.managers.sensor_manager"
 
+# Long enough that no test re-scans by accident. Tests that are about the
+# re-scan ask for one explicitly with rediscover_interval=0.
+_NEVER = 1_000_000.0
+
 
 def _vm(name="vm1", socket="/run/qemu/vm1-ga.sock") -> VMConfig:
     return VMConfig.from_dict(
@@ -41,16 +45,35 @@ class FakeVMManager:
 
 
 class FakeIPMI:
+    """A BMC whose sensor list and health can change between calls.
+
+    `names` and `error` are public and mutable because that is the scenario
+    under test: a BMC that reports a short SDR while it is still initialising
+    and fills it in later, or one that fails a scan and recovers.
+    """
+
     def __init__(self, *names: str, error=None):
-        self._names = list(names)
-        self._error = error
+        self.names = list(names)
+        self.error = error
         self.calls = 0
+        self.cycles = 0
 
     def temperature_sensor_names(self) -> list[str]:
         self.calls += 1
-        if self._error is not None:
-            raise self._error
-        return list(self._names)
+        if self.error is not None:
+            raise self.error
+        return list(self.names)
+
+    def temperature_readings(self) -> dict[str, float | None]:
+        # Discovery builds real IPMISensors against this fake, and they read
+        # through here. Every listed sensor reports the same benign value: what
+        # these tests are about is which sensors exist, not what they say.
+        if self.error is not None:
+            raise self.error
+        return {name: 22.0 for name in self.names}
+
+    def begin_cycle(self) -> None:
+        self.cycles += 1
 
 
 class FakeSensor(Sensor):
@@ -96,8 +119,14 @@ class SensorManagerTestCase(unittest.TestCase):
         self.addCleanup(patcher.stop)
         self.state = State()
 
-    def manager(self, vm_manager=None, ipmi=None, **sensors) -> SensorManager:
-        manager = SensorManager(vm_manager or FakeVMManager(), ipmi or FakeIPMI())
+    def manager(
+        self, vm_manager=None, ipmi=None, rediscover_interval=_NEVER, **sensors,
+    ) -> SensorManager:
+        manager = SensorManager(
+            vm_manager or FakeVMManager(),
+            ipmi or FakeIPMI(),
+            rediscover_interval=rediscover_interval,
+        )
         if sensors:
             manager._sensors = dict(sensors)
         return manager
@@ -366,6 +395,266 @@ class ReportingTests(SensorManagerTestCase):
         with self.assertLogs(_LOGGER, level="WARNING") as logs:
             manager.poll(self.state)
         self.assertFalse([line for line in logs.output if "Inlet Temp" in line])
+
+
+# ---------------------------------------------------------------------------
+# Cycle boundaries
+# ---------------------------------------------------------------------------
+class CycleBoundaryTests(SensorManagerTestCase):
+    """Each poll opens a cycle, so the BMC is queried once instead of once per
+    sensor and every reading in a cycle comes from the same sample."""
+
+    def test_each_poll_begins_a_cycle(self):
+        ipmi = FakeIPMI("Inlet Temp")
+        manager = self.manager(ipmi=ipmi, **{"Inlet Temp": FakeSensor(22.0)})
+        manager.poll(self.state)
+        self.assertEqual(ipmi.cycles, 1)
+
+    def test_every_poll_begins_its_own_cycle(self):
+        ipmi = FakeIPMI("Inlet Temp")
+        manager = self.manager(ipmi=ipmi, **{"Inlet Temp": FakeSensor(22.0)})
+        for _ in range(3):
+            manager.poll(self.state)
+        self.assertEqual(ipmi.cycles, 3)
+
+    def test_the_cycle_begins_before_any_sensor_is_read(self):
+        # Reading before invalidating would serve the previous cycle's cached
+        # table, leaving every reading exactly one poll out of date forever.
+        ipmi = FakeIPMI("Inlet Temp")
+        seen = []
+
+        class RecordingSensor(Sensor):
+            def read(self) -> float:
+                seen.append(ipmi.cycles)
+                return 22.0
+
+        manager = self.manager(ipmi=ipmi, **{"Inlet Temp": RecordingSensor()})
+        manager.poll(self.state)
+        self.assertEqual(seen, [1])
+
+    def test_a_poll_with_no_sensors_still_begins_a_cycle(self):
+        ipmi = FakeIPMI()
+        self.manager(ipmi=ipmi).poll(self.state)
+        self.assertEqual(ipmi.cycles, 1)
+
+
+# ---------------------------------------------------------------------------
+# Re-discovery
+# ---------------------------------------------------------------------------
+class RediscoveryTests(SensorManagerTestCase):
+    """The sensor set is not fixed at startup.
+
+    A BMC that is still initialising -- after an AC power loss, say -- reports a
+    short SDR. A set discovered once and never revisited leaves the daemon
+    driving a fraction of its sensors until someone restarts it, and nothing in
+    the log says so: the failed-sensor warning only fires for a sensor that was
+    discovered and then broke, never for one that was never discovered.
+    """
+
+    def test_a_sensor_that_appears_later_is_picked_up(self):
+        ipmi = FakeIPMI("Inlet Temp")
+        manager = self.manager(ipmi=ipmi, rediscover_interval=0)
+        manager.discover()
+        ipmi.names.append("Exhaust Temp")
+        manager.poll(self.state)
+        self.assertIn("Exhaust Temp", manager._sensors)
+
+    def test_a_sensor_that_appears_later_is_polled_in_the_same_cycle(self):
+        # Picking it up but waiting a further interval to read it would be a
+        # second, quieter version of the same bug.
+        ipmi = FakeIPMI("Inlet Temp")
+        manager = self.manager(ipmi=ipmi, rediscover_interval=0)
+        manager.discover()
+        ipmi.names.append("Exhaust Temp")
+        manager._sensors["Inlet Temp"] = FakeSensor(22.0)
+        manager.poll(self.state)
+        self.assertIn("Exhaust Temp", self.state.temperatures)
+
+    def test_a_sensor_that_vanishes_is_dropped(self):
+        ipmi = FakeIPMI("Inlet Temp", "Exhaust Temp")
+        manager = self.manager(ipmi=ipmi, rediscover_interval=0)
+        manager.discover()
+        ipmi.names.remove("Exhaust Temp")
+        manager.poll(self.state)
+        self.assertNotIn("Exhaust Temp", manager._sensors)
+
+    def test_an_unchanged_sensor_keeps_its_object(self):
+        # Rebuilding every sensor on every scan would discard whatever state a
+        # sensor implementation holds, for no reason.
+        ipmi = FakeIPMI("Inlet Temp")
+        manager = self.manager(ipmi=ipmi, rediscover_interval=0)
+        manager.discover()
+        original = manager._sensors["Inlet Temp"]
+        manager.poll(self.state)
+        self.assertIs(manager._sensors["Inlet Temp"], original)
+
+    def test_a_dropped_sensor_is_pruned_from_failure_tracking(self):
+        # Otherwise the set grows without bound across re-scans, and a name
+        # that came back would be reported as recovered without ever being lost.
+        ipmi = FakeIPMI("Inlet Temp")
+        manager = self.manager(ipmi=ipmi, rediscover_interval=0)
+        manager.discover()
+        manager._sensors["Inlet Temp"] = FakeSensor(error=IPMIError("no reading"))
+        with self.assertLogs(_LOGGER, level="WARNING"):
+            manager.poll(self.state)
+        self.assertIn("Inlet Temp", manager._failed_sensors)
+        ipmi.names.clear()
+        manager.poll(self.state)
+        self.assertNotIn("Inlet Temp", manager._failed_sensors)
+
+    def test_a_dropped_sensor_has_its_reading_cleared(self):
+        ipmi = FakeIPMI("Inlet Temp")
+        manager = self.manager(ipmi=ipmi, rediscover_interval=0)
+        manager.discover()
+        manager._sensors["Inlet Temp"] = FakeSensor(22.0)
+        manager.poll(self.state)
+        ipmi.names.clear()
+        manager.poll(self.state)
+        self.assertNotIn("Inlet Temp", self.state.temperatures)
+
+    def test_the_interval_is_respected(self):
+        # A re-scan is an extra ipmitool invocation; doing it every poll would
+        # undo the point of caching the table.
+        ipmi = FakeIPMI("Inlet Temp")
+        manager = self.manager(ipmi=ipmi)
+        manager.discover()
+        before = ipmi.calls
+        for _ in range(5):
+            manager.poll(self.state)
+        self.assertEqual(ipmi.calls, before)
+
+    def test_vm_sensors_survive_a_rescan(self):
+        # Re-scanning the BMC must not disturb the GPU sensors, which come from
+        # configuration rather than from the SDR.
+        ipmi = FakeIPMI("Inlet Temp")
+        manager = self.manager(
+            vm_manager=FakeVMManager(vm1=_vm()), ipmi=ipmi, rediscover_interval=0,
+        )
+        manager.discover()
+        manager.poll(self.state)
+        self.assertIn("vm1 GPU", manager._sensors)
+
+
+# ---------------------------------------------------------------------------
+# Re-discovery failure
+# ---------------------------------------------------------------------------
+class RediscoveryFailureTests(SensorManagerTestCase):
+    """A scan that fails must leave the previous set alone.
+
+    Policy reads an empty temperature set as "no data" and answers with
+    EMERGENCY and 100% fans. If a transient ipmitool failure could empty the
+    sensor set, this fix would have turned a blip into a chassis running every
+    fan flat out.
+    """
+
+    def test_a_failed_rescan_keeps_the_previous_sensors(self):
+        ipmi = FakeIPMI("Inlet Temp", "Exhaust Temp")
+        manager = self.manager(ipmi=ipmi, rediscover_interval=0)
+        manager.discover()
+        ipmi.error = IPMIError("BMC unreachable")
+        with self.assertLogs(_LOGGER, level="WARNING"):
+            manager.poll(self.state)
+        self.assertEqual(set(manager._sensors), {"Inlet Temp", "Exhaust Temp"})
+
+    def test_a_failed_rescan_does_not_empty_state(self):
+        ipmi = FakeIPMI("Inlet Temp")
+        manager = self.manager(ipmi=ipmi, rediscover_interval=0)
+        manager.discover()
+        manager._sensors["Inlet Temp"] = FakeSensor(22.0)
+        ipmi.error = IPMIError("BMC unreachable")
+        with self.assertLogs(_LOGGER, level="WARNING"):
+            manager.poll(self.state)
+        self.assertEqual(self.state.temperatures["Inlet Temp"].value, 22.0)
+
+    def test_a_failed_rescan_is_logged(self):
+        ipmi = FakeIPMI("Inlet Temp")
+        manager = self.manager(ipmi=ipmi, rediscover_interval=0)
+        manager.discover()
+        ipmi.error = IPMIError("BMC unreachable")
+        with self.assertLogs(_LOGGER, level="WARNING") as logs:
+            manager.poll(self.state)
+        self.assertTrue([line for line in logs.output if "BMC unreachable" in line])
+
+    def test_a_rescan_recovers_after_a_failure(self):
+        ipmi = FakeIPMI("Inlet Temp")
+        manager = self.manager(ipmi=ipmi, rediscover_interval=0)
+        manager.discover()
+        ipmi.error = IPMIError("BMC unreachable")
+        with self.assertLogs(_LOGGER, level="WARNING"):
+            manager.poll(self.state)
+        ipmi.error = None
+        ipmi.names.append("Exhaust Temp")
+        manager.poll(self.state)
+        self.assertIn("Exhaust Temp", manager._sensors)
+
+    def test_a_failed_rescan_does_not_stop_the_poll(self):
+        # The whole poll must still run: a scan is housekeeping, and a cooking
+        # CPU cannot wait for the BMC's sensor list to come back.
+        ipmi = FakeIPMI("Temp", error=IPMIError("BMC unreachable"))
+        manager = self.manager(
+            ipmi=ipmi, rediscover_interval=0, **{"Temp": FakeSensor(97.0)},
+        )
+        with self.assertLogs(_LOGGER, level="WARNING"):
+            manager.poll(self.state)
+        self.assertEqual(self.state.temperatures["Temp"].value, 97.0)
+
+
+# ---------------------------------------------------------------------------
+# Discovery reporting
+# ---------------------------------------------------------------------------
+class DiscoveryReportingTests(SensorManagerTestCase):
+    """The set the daemon is driving has to be visible in the journal.
+
+    A sensor that is never discovered produces no other log line at all, which
+    is why an incomplete sensor set went unnoticed on real hardware.
+    """
+
+    def test_the_discovered_set_is_logged(self):
+        manager = self.manager(ipmi=FakeIPMI("Inlet Temp", "Exhaust Temp"))
+        with self.assertLogs(_LOGGER, level="INFO") as logs:
+            manager.discover()
+        self.assertTrue([line for line in logs.output if "Inlet Temp" in line])
+
+    def test_gpu_sensors_are_named_in_the_log_too(self):
+        manager = self.manager(
+            vm_manager=FakeVMManager(vm1=_vm()), ipmi=FakeIPMI("Inlet Temp"),
+        )
+        with self.assertLogs(_LOGGER, level="INFO") as logs:
+            manager.discover()
+        self.assertTrue([line for line in logs.output if "vm1 GPU" in line])
+
+    def test_discovering_nothing_is_logged(self):
+        # The most important case to see in a journal, and the quietest.
+        manager = self.manager(ipmi=FakeIPMI())
+        with self.assertLogs(_LOGGER, level="INFO"):
+            manager.discover()
+
+    def test_an_added_sensor_is_logged(self):
+        ipmi = FakeIPMI("Inlet Temp")
+        manager = self.manager(ipmi=ipmi, rediscover_interval=0)
+        manager.discover()
+        ipmi.names.append("Exhaust Temp")
+        with self.assertLogs(_LOGGER, level="INFO") as logs:
+            manager.poll(self.state)
+        self.assertTrue([line for line in logs.output if "Exhaust Temp" in line])
+
+    def test_a_removed_sensor_is_logged(self):
+        ipmi = FakeIPMI("Inlet Temp", "Exhaust Temp")
+        manager = self.manager(ipmi=ipmi, rediscover_interval=0)
+        manager.discover()
+        ipmi.names.remove("Exhaust Temp")
+        with self.assertLogs(_LOGGER, level="INFO") as logs:
+            manager.poll(self.state)
+        self.assertTrue([line for line in logs.output if "Exhaust Temp" in line])
+
+    def test_an_unchanged_rescan_is_quiet(self):
+        # Re-logging an identical set every interval would bury the scan that
+        # actually changed something.
+        ipmi = FakeIPMI("Inlet Temp")
+        manager = self.manager(ipmi=ipmi, rediscover_interval=0)
+        manager.discover()
+        with self.assertNoLogs(_LOGGER, level="INFO"):
+            manager.poll(self.state)
 
 
 if __name__ == "__main__":

@@ -1,6 +1,12 @@
 [daemon]
 poll_interval = 5
 log_level = "INFO"
+# Seconds between IPMI sensor re-scans. The BMC's sensor list is not fixed at
+# startup: after an AC power loss the iDRAC repopulates its SDR on its own
+# schedule, often slower than the host boots, so a set discovered once can be
+# incomplete. Re-scanning picks up sensors that appear later and drops ones that
+# vanish. This is not how often sensors are read -- that is poll_interval.
+sensor_rediscover_interval = 300
 
 [fan_curve]
 # Ordered (temperature_c, fan_percent) points; the policy layer

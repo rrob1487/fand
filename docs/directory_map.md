@@ -224,13 +224,13 @@ Stdlib `unittest` — no test dependency is required.
 | `support/http_server.py` | Loopback HTTP server used by the transport and endpoint tests. |
 | `support/qga_server.py` | Loopback QEMU Guest Agent over a real UNIX socket. POSIX only. |
 | `factories/test_notifier_factory.py` | Endpoint registry, credential resolution, notifier assembly. |
-| `factories/test_sensor_factory.py` | GPU sensor wiring and IPMI sensor discovery. |
-| `hardware/test_ipmi.py` | Sensor-table parsing, ipmitool invocation and failures, Dell raw fan-control bytes. |
+| `factories/test_sensor_factory.py` | GPU sensor wiring and IPMI sensor discovery, including currently-unreadable sensors. |
+| `hardware/test_ipmi.py` | SDR temperature-table parsing, unreadable sensors, sensor-ID-keyed naming, per-cycle caching, ipmitool invocation and failures, Dell raw fan-control bytes. |
 | `hardware/test_gpu.py` | nvidia-smi request shape, output parsing, and read failures. |
 | `hardware/test_sensor.py` | The Sensor interface both implementations must satisfy. |
 | `managers/test_config_manager.py` | Config discovery, lenient notifier loading, atomic reload. |
 | `managers/test_notification_manager.py` | State snapshots, dispatch, reload reconciliation, self-test. |
-| `managers/test_sensor_manager.py` | Sensor discovery, polling, failure isolation, warn-once reporting. |
+| `managers/test_sensor_manager.py` | Sensor discovery and periodic re-scan, polling, failure isolation, warn-once reporting. |
 | `managers/test_vm_manager.py` | Per-VM guest-agent clients and iteration. |
 | `models/test_config.py` | Daemon configuration parsing, defaults, and the shipped example. |
 | `models/test_notification.py` | Notifier configuration parsing and validation. |

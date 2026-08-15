@@ -19,20 +19,25 @@ from lib.hardware.ipmi import (
     IPMISensor,
 )
 
-# A trimmed but otherwise faithful `ipmitool sensor` table from a PowerEdge:
-# two identically-named CPU sensors, non-temperature numeric sensors, an
-# unreadable sensor, and a discrete one.
-_SENSOR_TABLE = """\
-Temp             | 41.000     | degrees C  | ok    | na        | 3.000     | 8.000     | 82.000    | 87.000    | na
-Temp             | 40.000     | degrees C  | ok    | na        | 3.000     | 8.000     | 82.000    | 87.000    | na
-Inlet Temp       | 22.000     | degrees C  | ok    | na        | -7.000    | 3.000     | 42.000    | 47.000    | na
-Exhaust Temp     | 34.000     | degrees C  | ok    | na        | 3.000     | 8.000     | 70.000    | 75.000    | na
-Fan1A            | 6000.000   | RPM        | ok    | na        | 600.000   | 840.000   | na        | na        | na
-Fan2A            | 5040.000   | RPM        | ok    | na        | 600.000   | 840.000   | na        | na        | na
-Voltage 1        | na         |            | na    | na        | na        | na        | na        | na        | na
-Current 1        | 0.200      | Amps       | ok    | na        | na        | na        | na        | na        | na
-Pwr Consumption  | 154.000    | Watts      | ok    | na        | na        | na        | na        | 896.000   | 980.000
-Status           | 0x00       | discrete   | 0x0080| na        | na        | na        | na        | na        | na
+# The verbatim `ipmitool sdr type temperature` table from the R730 this daemon
+# runs on. Five fields: name, SDR sensor ID, status, entity ID, reading. The two
+# CPU sensors are both called "Temp" and are told apart only by their sensor ID.
+_SDR_TABLE = """\
+Inlet Temp       | 04h | ok  |  7.1 | 19 degrees C
+Exhaust Temp     | 01h | ok  |  7.1 | 34 degrees C
+Temp             | 0Eh | ok  |  3.1 | 29 degrees C
+Temp             | 0Fh | ok  |  3.2 | 35 degrees C
+"""
+
+# The same chassis while the BMC is still initialising, which is what fand sees
+# when it starts before iDRAC has finished repopulating its SDR after an AC
+# power loss. iDRAC words an absent reading differently across versions, so both
+# spellings appear here: the parser must not depend on which one it is handed.
+_SDR_TABLE_DEGRADED = """\
+Inlet Temp       | 04h | ok  |  7.1 | 19 degrees C
+Exhaust Temp     | 01h | ns  |  7.1 | No Reading
+Temp             | 0Eh | ns  |  3.1 | Disabled
+Temp             | 0Fh | ok  |  3.2 | 35 degrees C
 """
 
 
@@ -164,112 +169,176 @@ class InvocationFailureTests(IPMITestCase):
 
 
 # ---------------------------------------------------------------------------
-# Sensor table parsing
+# SDR temperature table parsing
 # ---------------------------------------------------------------------------
-class SensorTableTests(unittest.TestCase):
-    """Pure text in, dict out."""
+class SdrTemperatureTableTests(unittest.TestCase):
+    """Pure text in, {name: celsius | None} out."""
 
-    def parse(self, text=_SENSOR_TABLE):
-        return IPMI._parse_sensor_table(text)
+    def parse(self, text=_SDR_TABLE):
+        return IPMI._parse_sdr_temperature_table(text)
 
-    def test_named_sensors_are_read(self):
+    def test_every_sensor_is_read(self):
         table = self.parse()
-        self.assertEqual(table["Inlet Temp"], (22.0, "degrees C"))
-        self.assertEqual(table["Exhaust Temp"], (34.0, "degrees C"))
+        self.assertEqual(table["Inlet Temp"], 19.0)
+        self.assertEqual(table["Exhaust Temp"], 34.0)
 
-    def test_duplicate_names_are_numbered_in_encounter_order(self):
+    def test_duplicate_names_are_numbered_by_sensor_id(self):
         # Dual-CPU PowerEdge boards report two sensors both called "Temp".
         table = self.parse()
-        self.assertEqual(table["Temp"][0], 41.0)
-        self.assertEqual(table["Temp #2"][0], 40.0)
+        self.assertEqual(table["Temp"], 29.0)       # 0Eh
+        self.assertEqual(table["Temp #2"], 35.0)    # 0Fh
+
+    def test_numbering_follows_sensor_id_not_output_order(self):
+        # The suffix must be a property of the hardware, not of the order the
+        # BMC happened to walk its SDR in.
+        rows = _SDR_TABLE.strip().splitlines()
+        table = self.parse("\n".join(reversed(rows)) + "\n")
+        self.assertEqual(table["Temp"], 29.0)
+        self.assertEqual(table["Temp #2"], 35.0)
+
+    def test_an_unreadable_sensor_is_kept_with_no_reading(self):
+        # The whole point: absent from the reading is not absent from the
+        # chassis. Dropping it here is what silently shrank the sensor set.
+        table = self.parse(_SDR_TABLE_DEGRADED)
+        self.assertIn("Exhaust Temp", table)
+        self.assertIsNone(table["Exhaust Temp"])
+
+    def test_numbering_is_unchanged_when_a_duplicate_is_unreadable(self):
+        # "Temp" is 0Eh whether or not 0Eh can be read right now. If an
+        # unreadable row stopped consuming its slot, the readable 0Fh sensor
+        # would slide into "Temp" and the daemon would report CPU2's
+        # temperature under CPU1's name.
+        table = self.parse(_SDR_TABLE_DEGRADED)
+        self.assertIsNone(table["Temp"])
+        self.assertEqual(table["Temp #2"], 35.0)
+
+    def test_both_unreadable_spellings_parse_to_none(self):
+        table = self.parse(_SDR_TABLE_DEGRADED)
+        self.assertIsNone(table["Exhaust Temp"])    # "No Reading"
+        self.assertIsNone(table["Temp"])            # "Disabled"
+
+    def test_the_ns_spelling_also_parses_to_none(self):
+        self.assertIsNone(self.parse("Temp | 0Eh | ns | 3.1 | ns\n")["Temp"])
 
     def test_a_third_duplicate_keeps_counting(self):
-        text = "Temp | 1.000 | degrees C\nTemp | 2.000 | degrees C\nTemp | 3.000 | degrees C\n"
+        text = (
+            "Temp | 0Eh | ok | 3.1 | 1 degrees C\n"
+            "Temp | 0Fh | ok | 3.2 | 2 degrees C\n"
+            "Temp | 10h | ok | 3.3 | 3 degrees C\n"
+        )
         self.assertEqual(set(self.parse(text)), {"Temp", "Temp #2", "Temp #3"})
 
-    def test_unreadable_sensors_are_skipped(self):
-        # "na" is not a reading, and inventing 0.0 for it would read as cold.
-        self.assertNotIn("Voltage 1", self.parse())
+    def test_fahrenheit_is_converted_to_celsius(self):
+        # iDRAC can be configured to report Fahrenheit. Every threshold in
+        # config.toml is Celsius, so trusting the number as-is would read 104F
+        # as 104C and trip an emergency shutdown on an idle machine.
+        table = self.parse("Odd Temp | 04h | ok | 7.1 | 104 degrees F\n")
+        self.assertAlmostEqual(table["Odd Temp"], 40.0)
 
-    def test_discrete_sensors_are_skipped(self):
-        self.assertNotIn("Status", self.parse())
+    def test_an_unknown_unit_has_no_reading(self):
+        # Better no reading than a number in units we cannot name.
+        self.assertIsNone(self.parse("Odd | 04h | ok | 7.1 | 42 kelvin\n")["Odd"])
 
-    def test_non_temperature_sensors_are_still_parsed(self):
-        # _parse_sensor_table is unit-agnostic; filtering happens above it.
-        table = self.parse()
-        self.assertEqual(table["Fan1A"], (6000.0, "RPM"))
-        self.assertEqual(table["Pwr Consumption"], (154.0, "Watts"))
+    def test_the_unit_match_is_case_insensitive(self):
+        table = self.parse("Odd | 04h | ok | 7.1 | 40 Degrees C\n")
+        self.assertEqual(table["Odd"], 40.0)
+
+    def test_negative_readings_are_kept(self):
+        table = self.parse("Cold Thing | 04h | ok | 7.1 | -12 degrees C\n")
+        self.assertEqual(table["Cold Thing"], -12.0)
+
+    def test_fractional_readings_are_kept(self):
+        table = self.parse("Precise | 04h | ok | 7.1 | 23.5 degrees C\n")
+        self.assertEqual(table["Precise"], 23.5)
 
     def test_lines_without_a_separator_are_ignored(self):
-        text = "Some banner line\n" + _SENSOR_TABLE
-        self.assertEqual(self.parse(text), self.parse())
+        self.assertEqual(self.parse("Some banner line\n" + _SDR_TABLE), self.parse())
 
     def test_short_rows_are_ignored(self):
-        text = "Truncated | 40.000\n" + _SENSOR_TABLE
-        self.assertNotIn("Truncated", self.parse(text))
+        self.assertNotIn("Truncated", self.parse("Truncated | 04h\n" + _SDR_TABLE))
 
     def test_a_nameless_row_is_ignored(self):
-        text = " | 40.000 | degrees C\n"
-        self.assertEqual(self.parse(text), {})
-
-    def test_an_empty_value_is_ignored(self):
-        text = "Ghost |  | degrees C\n"
-        self.assertEqual(self.parse(text), {})
+        self.assertEqual(self.parse(" | 04h | ok | 7.1 | 19 degrees C\n"), {})
 
     def test_empty_output_parses_to_nothing(self):
         self.assertEqual(self.parse(""), {})
 
-    def test_whitespace_is_stripped_from_names_and_units(self):
+    def test_whitespace_is_stripped_from_names(self):
         self.assertIn("Inlet Temp", self.parse())
-        self.assertEqual(self.parse()["Inlet Temp"][1], "degrees C")
-
-    def test_negative_readings_are_kept(self):
-        text = "Cold Thing | -12.500 | degrees C\n"
-        self.assertEqual(self.parse(text)["Cold Thing"][0], -12.5)
 
 
-class SensorReadingsTests(IPMITestCase):
-    def test_readings_drop_the_unit(self):
-        self.run_with(stdout=_SENSOR_TABLE)
-        readings = IPMI().sensor_readings()
-        self.assertEqual(readings["Inlet Temp"], 22.0)
-        self.assertEqual(readings["Fan1A"], 6000.0)
+class TemperatureReadingsTests(IPMITestCase):
+    def test_readings_come_from_the_sdr_temperature_subcommand(self):
+        fake = self.run_with(stdout=_SDR_TABLE)
+        IPMI().temperature_readings()
+        self.assertEqual(fake.argv[1:], ["sdr", "type", "temperature"])
 
-    def test_readings_come_from_the_sensor_subcommand(self):
-        fake = self.run_with(stdout=_SENSOR_TABLE)
-        IPMI().sensor_readings()
-        self.assertEqual(fake.argv[1:], ["sensor"])
+    def test_readings_are_returned_by_name(self):
+        self.run_with(stdout=_SDR_TABLE)
+        self.assertEqual(IPMI().temperature_readings()["Inlet Temp"], 19.0)
+
+
+class SdrCacheTests(IPMITestCase):
+    """One BMC query per cycle, not one per sensor.
+
+    Each IPMISensor used to trigger its own full table walk. On a chassis with
+    several sensors that multiplies BMC latency by the sensor count, inside the
+    same cycle that has to kick a 60s watchdog afterwards.
+    """
+
+    def test_the_bmc_is_queried_once_across_many_reads(self):
+        fake = self.run_with(stdout=_SDR_TABLE)
+        ipmi = IPMI()
+        for name in ("Inlet Temp", "Exhaust Temp", "Temp", "Temp #2"):
+            IPMISensor(ipmi, name).read()
+        self.assertEqual(len(fake.calls), 1)
+
+    def test_begin_cycle_forces_a_fresh_query(self):
+        # Cached readings must not outlive the cycle that produced them.
+        fake = self.run_with(stdout=_SDR_TABLE)
+        ipmi = IPMI()
+        ipmi.temperature_readings()
+        ipmi.begin_cycle()
+        ipmi.temperature_readings()
+        self.assertEqual(len(fake.calls), 2)
+
+    def test_a_failed_query_is_not_cached(self):
+        # Otherwise the retry decorator would re-examine a cached failure three
+        # times over without ever asking the BMC again.
+        fake = self.run_with(returncode=1, stderr="BMC unreachable")
+        ipmi = IPMI()
+        for _ in range(3):
+            with self.assertRaises(IPMIError):
+                ipmi.temperature_readings()
+        self.assertEqual(len(fake.calls), 3)
+
+    def test_a_cycle_sees_one_consistent_snapshot(self):
+        # All of a cycle's readings come from the same instant, so two sensors
+        # can never be compared across different BMC samples.
+        self.run_with(stdout=_SDR_TABLE)
+        ipmi = IPMI()
+        self.assertEqual(ipmi.temperature_readings(), ipmi.temperature_readings())
 
 
 class TemperatureSensorNameTests(IPMITestCase):
-    """The filter exists so a caller building temperature sensors cannot
-    accidentally wire one up to a fan tachometer or a voltage rail."""
+    """Names drive discovery, so this is the list the daemon ends up driving."""
 
-    def names(self, stdout=_SENSOR_TABLE):
+    def names(self, stdout=_SDR_TABLE):
         self.run_with(stdout=stdout)
         return IPMI().temperature_sensor_names()
 
     def test_every_temperature_sensor_is_listed(self):
         self.assertEqual(
-            self.names(), ["Temp", "Temp #2", "Inlet Temp", "Exhaust Temp"],
+            self.names(), ["Inlet Temp", "Exhaust Temp", "Temp", "Temp #2"],
         )
 
-    def test_fan_speeds_are_excluded(self):
-        names = self.names()
-        self.assertNotIn("Fan1A", names)
-        self.assertNotIn("Fan2A", names)
-
-    def test_power_and_current_are_excluded(self):
-        names = self.names()
-        self.assertNotIn("Pwr Consumption", names)
-        self.assertNotIn("Current 1", names)
-
-    def test_the_unit_match_is_case_insensitive(self):
-        self.assertEqual(self.names("Odd Temp | 40.000 | Degrees C\n"), ["Odd Temp"])
-
-    def test_fahrenheit_would_also_be_accepted(self):
-        # The filter is on "degree", not on Celsius specifically.
-        self.assertEqual(self.names("Odd Temp | 104.000 | degrees F\n"), ["Odd Temp"])
+    def test_unreadable_sensors_are_still_listed(self):
+        # A sensor the BMC cannot read yet still exists and still has to be
+        # discovered, or it never gets the chance to recover.
+        self.assertEqual(
+            self.names(_SDR_TABLE_DEGRADED),
+            ["Inlet Temp", "Exhaust Temp", "Temp", "Temp #2"],
+        )
 
     def test_a_bmc_reporting_nothing_yields_no_names(self):
         self.assertEqual(self.names(""), [])
@@ -280,24 +349,43 @@ class TemperatureSensorNameTests(IPMITestCase):
 # ---------------------------------------------------------------------------
 class IPMISensorTests(IPMITestCase):
     def test_the_named_sensor_is_returned(self):
-        self.run_with(stdout=_SENSOR_TABLE)
+        self.run_with(stdout=_SDR_TABLE)
         self.assertEqual(IPMISensor(IPMI(), "Exhaust Temp").read(), 34.0)
 
     def test_the_default_sensor_is_exhaust_temp(self):
-        self.run_with(stdout=_SENSOR_TABLE)
+        self.run_with(stdout=_SDR_TABLE)
         self.assertEqual(IPMISensor(IPMI()).read(), 34.0)
 
     def test_a_numbered_duplicate_can_be_read(self):
-        self.run_with(stdout=_SENSOR_TABLE)
-        self.assertEqual(IPMISensor(IPMI(), "Temp #2").read(), 40.0)
+        self.run_with(stdout=_SDR_TABLE)
+        self.assertEqual(IPMISensor(IPMI(), "Temp #2").read(), 35.0)
 
     def test_a_missing_sensor_raises(self):
         # A sensor that vanished between discovery and this poll is a failure,
         # not a zero reading.
-        self.run_with(stdout=_SENSOR_TABLE)
+        self.run_with(stdout=_SDR_TABLE)
         with self.assertRaises(IPMIError) as caught:
             IPMISensor(IPMI(), "Nonexistent Temp").read()
         self.assertIn("Nonexistent Temp", str(caught.exception))
+
+    def test_an_unreadable_sensor_raises(self):
+        # Listed by the SDR but with no reading. Raising is what routes it into
+        # SensorManager's failed-sensor handling, so it warns once and recovers
+        # by itself once the BMC starts reporting it.
+        self.run_with(stdout=_SDR_TABLE_DEGRADED)
+        with self.assertRaises(IPMIError) as caught:
+            IPMISensor(IPMI(), "Exhaust Temp").read()
+        self.assertIn("Exhaust Temp", str(caught.exception))
+
+    def test_an_unreadable_sensor_is_not_reported_as_zero(self):
+        # Zero would read as ice-cold and idle the fans on a hot chassis.
+        self.run_with(stdout=_SDR_TABLE_DEGRADED)
+        with self.assertRaises(IPMIError):
+            IPMISensor(IPMI(), "Temp").read()
+
+    def test_a_readable_duplicate_is_unaffected_by_an_unreadable_one(self):
+        self.run_with(stdout=_SDR_TABLE_DEGRADED)
+        self.assertEqual(IPMISensor(IPMI(), "Temp #2").read(), 35.0)
 
     def test_an_ipmitool_failure_propagates(self):
         self.run_with(returncode=1, stderr="BMC unreachable")

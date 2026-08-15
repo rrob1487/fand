@@ -197,7 +197,12 @@ fand/
 - `[Credentials]` values are **environment variable names**, never secret values.
 - How sensor names are formed, so `Sensors` lists can be written correctly: IPMI sensors use the
   BMC's own names as discovered by `IPMI.temperature_sensor_names()` (including the `"Temp"`,
-  `"Temp #2"` disambiguation), and each VM contributes one sensor named `"<vm name> GPU"`.
+  `"Temp #2"` disambiguation, which is keyed on SDR sensor ID so a name always refers to the same
+  physical sensor), and each VM contributes one sensor named `"<vm name> GPU"`.
+- That a `Sensors` entry naming a sensor which is currently unreadable is **not** the same as one
+  naming a sensor that does not exist. The former is reported as unavailable for as long as the BMC
+  cannot read it and resumes on its own; the latter is a typo and warns once. Both leave the rest of
+  the notification intact.
 - An explicit note that **notifier configuration errors are non-fatal**: the affected notifier is
   logged and skipped while the daemon and all other notifiers continue. This deliberately differs
   from `config.toml` and `vms/*.toml`, where a bad file is fatal at startup, because a missing

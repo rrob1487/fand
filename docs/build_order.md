@@ -304,7 +304,8 @@ Contains:
 ```python
 class IPMI:
     raw_command()
-    sensor_readings()
+    begin_cycle()
+    temperature_readings()
     temperature_sensor_names()
 
 class IPMISensor(Sensor):
@@ -318,14 +319,47 @@ class IPMIFanController:
 - temperature reading
 - fan speed control
 - Dell raw command support
-- `temperature_sensor_names()`: names of every BMC sensor reporting a
-  temperature unit (e.g. `"degrees C"` in `ipmitool sensor`'s output),
-  excluding non-temperature numeric sensors (fan RPM, voltage, power
-  draw, ...). Sensor count and naming vary by chassis — some boards
-  report two identically-named `"Temp"` sensors for dual CPUs — so this
-  is discovered from hardware at runtime rather than hand-enumerated in
-  configuration. Disambiguates repeated names in encounter order:
-  `"Temp"`, `"Temp #2"`, ...
+- `temperature_sensor_names()`: names of every temperature sensor the BMC's
+  SDR lists, **including ones that are currently unreadable**. Sensor count
+  and naming vary by chassis — some boards report two identically-named
+  `"Temp"` sensors for dual CPUs — so this is discovered from hardware at
+  runtime rather than hand-enumerated in configuration.
+- `temperature_readings()`: `{name: celsius | None}`, `None` meaning the SDR
+  lists the sensor but has no reading for it right now. A caller turns that
+  into a failed sensor, never into an absent one.
+- `begin_cycle()`: drops the cached SDR table so the next read re-queries the
+  BMC. `temperature_readings()` parses once per cycle and every `IPMISensor`
+  shares that result — without it each sensor triggers its own full table walk,
+  multiplying BMC latency by the sensor count inside the watchdog's deadline.
+  Invalidation is explicit rather than time-based, so a cycle's readings are a
+  function of its inputs and not of how long the cycle took.
+
+Both readings and names come from one `ipmitool sdr type temperature`
+invocation, whose rows carry five pipe-separated fields — name, sensor ID,
+status, entity ID, reading:
+
+```
+Inlet Temp       | 04h | ok  |  7.1 | 19 degrees C
+Exhaust Temp     | 01h | ok  |  7.1 | 34 degrees C
+Temp             | 0Eh | ok  |  3.1 | 29 degrees C
+Temp             | 0Fh | ok  |  3.2 | 35 degrees C
+```
+
+`sdr type temperature` rather than `ipmitool sensor`: the BMC filters by type
+itself, so an unreadable sensor is still identifiable as a temperature sensor.
+An unreadable row in `ipmitool sensor`'s output has a blank unit column, which
+makes a dead temperature sensor indistinguishable from a dead fan.
+
+Repeated names are disambiguated by **sensor ID**, not by position in the
+output: `"Temp"` (`0Eh`), `"Temp #2"` (`0Fh`). A name must refer to the same
+physical sensor across BMC restarts and regardless of which sensors are
+readable — a suffix assigned in encounter order silently re-points at a
+different CPU when one of them is missing.
+
+An unreadable reading is detected by failing to parse a leading number, not by
+matching wording: iDRAC spells it `Disabled`, `No Reading` or `ns` depending on
+version. Readings in `degrees F` are converted to Celsius; any other unit is
+treated as no reading.
 
 **Must NOT do:**
 - Decide cooling policy
@@ -354,14 +388,20 @@ class IPMIFanController:
 
 ```python
 create_gpu_sensor(vm: VMConfig, timeout: float = 5.0) -> GPUSensor
-discover_ipmi_sensors(ipmi: IPMI) -> list[IPMISensor]
+discover_ipmi_sensors(ipmi: IPMI) -> dict[str, IPMISensor]
 ```
 
 `create_gpu_sensor` builds a `GPUSensor` from a VM's configuration (one
 GPU sensor per VM, matching `vm.toml`). `discover_ipmi_sensors` calls
 `IPMI.temperature_sensor_names()` and builds one `IPMISensor` per name
-reported — IPMI sensor count and naming is hardware-specific, not
-something `config.toml` enumerates.
+reported, keyed by name so callers can attribute a reading back to its
+source — IPMI sensor count and naming is hardware-specific, not something
+`config.toml` enumerates.
+
+A name that is currently unreadable still gets a sensor. Deciding that an
+unreadable sensor does not exist is not this layer's call to make: it builds
+what the BMC lists and lets `SensorManager` classify a sensor that fails to
+read as failed-and-recoverable.
 
 **Must NOT do:**
 - Contain temperature policy
@@ -456,10 +496,30 @@ Managers own groups of runtime objects. They coordinate but do not make decision
 - sensor factory
 - VM manager
 
+**Must provide:**
+- `discover()`: rebuilds the sensor set and logs it at INFO. The set the daemon
+  is driving must be visible in the journal — a sensor that is never discovered
+  produces no other log line, so without this an incomplete set is silent.
+- Per-cycle cache invalidation: `poll()` calls `IPMI.begin_cycle()` before
+  reading, so every sensor in a cycle sees one consistent snapshot and the BMC
+  is queried once rather than once per sensor.
+- Periodic re-scan, every `daemon.sensor_rediscover_interval` seconds. Sensors
+  that appear later are added, sensors that vanish are dropped, and both are
+  logged. Discovery at startup alone is not enough: a BMC that is still
+  initialising reports a short SDR, and the daemon would otherwise run with
+  that set until it was restarted.
+
+**Must NOT do:**
+- Let a re-scan failure empty the sensor set. A transient `ipmitool` failure
+  must leave the previous set in place — `Policy` treats no temperature data as
+  an emergency and drives the fans to 100%, so an unguarded re-scan turns a
+  blip into a chassis full of screaming fans.
+
 **Phase Completion Criteria:**
 - Configuration loads.
 - VM sensors are created automatically.
 - Sensor polling works.
+- A sensor that appears after startup is picked up without a restart.
 
 ---
 

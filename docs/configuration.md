@@ -2,15 +2,22 @@
 
 ## Global Configuration
 
-Contains daemon-wide settings.
+Contains daemon-wide settings: poll interval, sensor re-scan interval, logging
+level, fan curve, safety thresholds, and watchdog options.
 
-Examples:
+### `[daemon]`
 
-- Poll interval
-- Logging level
-- Fan curve
-- Safety thresholds
-- Watchdog options
+| Key | Type | Required | Default | Notes |
+|-----|------|----------|---------|-------|
+| `poll_interval` | number | yes | — | Seconds between control cycles. |
+| `log_level` | string | yes | — | Standard `logging` level name. Overridden by `-v`. |
+| `sensor_rediscover_interval` | number | no | `300` | Seconds between IPMI sensor re-scans. See [IPMI Sensor Discovery](#ipmi-sensor-discovery). |
+
+`sensor_rediscover_interval` bounds how long the daemon can run with an
+incomplete sensor set after the BMC comes up slowly — a sensor that appears
+after startup is picked up within one interval, without a restart or a reload.
+Lowering it costs one extra `ipmitool` invocation per scan; it does not affect
+how often sensors are *read*, which is `poll_interval`.
 
 ## VM Configuration
 
@@ -28,9 +35,30 @@ The daemon automatically discovers VM configuration files during startup.
 
 IPMI temperature sensors (inlet, exhaust, per-CPU, ...) are not listed in
 `config.toml`. Sensor count and naming vary by chassis, so the daemon
-queries the BMC (`ipmitool sensor`) at startup and builds one temperature
+queries the BMC (`ipmitool sdr type temperature`) and builds one temperature
 sensor per sensor reported, the same way VM configuration files are
 discovered automatically rather than hand-enumerated.
+
+`sdr type temperature` is used rather than `ipmitool sensor` because the BMC
+does the type filtering itself: a sensor that is currently unreadable is still
+listed, and is still identifiable as a temperature sensor. In `ipmitool
+sensor`'s output an unreadable row carries a blank unit column, which makes a
+dead temperature sensor indistinguishable from a dead fan.
+
+**A sensor that is unreadable at discovery is still registered.** It becomes a
+*failed* sensor — logged once as lost, and logged again as recovered once the
+BMC reports it — rather than a sensor that does not exist. This matters after an
+AC power loss: the iDRAC repopulates its SDR on its own schedule, frequently
+slower than the host boots, so treating "unreadable now" as "absent forever"
+would leave the daemon silently driving a fraction of its sensors until the next
+restart.
+
+**The sensor set is re-scanned periodically**, every
+`daemon.sensor_rediscover_interval` seconds. Sensors that appear later are added,
+sensors that vanish from the SDR are dropped, and both are logged. A scan that
+fails leaves the previous set in place: an empty sensor set means no temperature
+data, which the policy layer correctly treats as an emergency, and a transient
+`ipmitool` failure must not be able to trigger that.
 
 ## Notification Configuration
 
@@ -115,11 +143,26 @@ this is the one place a typo in them can be caught.
 
 `Sensors` entries must match the names the daemon uses internally:
 
-- **IPMI sensors** use the BMC's own names, discovered at startup. Repeated
-  names are disambiguated in encounter order: `"Temp"`, `"Temp #2"`.
+- **IPMI sensors** use the BMC's own names, discovered from the SDR. Repeated
+  names are disambiguated by SDR sensor ID. On an R730 both CPU sensors are
+  named `Temp`, and become `"Temp"` (sensor `0Eh`) and `"Temp #2"` (`0Fh`):
+
+  | Name | SDR sensor ID |
+  |------|---------------|
+  | `Inlet Temp` | `04h` |
+  | `Exhaust Temp` | `01h` |
+  | `Temp` | `0Eh` |
+  | `Temp #2` | `0Fh` |
+
+  Ordering by sensor ID rather than by position in the output is what makes the
+  mapping stable: a name always refers to the same physical sensor, whatever
+  order the BMC returns its rows in and whichever of them are readable at the
+  time. A name that moved between CPUs depending on BMC state would make the
+  same temperatures produce different decisions.
 - **GPU sensors** are named `"<vm name> GPU"`, one per configured VM.
 
-Run the daemon with `-v` to see the discovered names.
+The discovered set is logged at INFO, so the names appear in the journal without
+needing `-v`.
 
 A configured sensor that is not available is omitted and the remaining data is
 still delivered.

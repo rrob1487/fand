@@ -59,6 +59,17 @@ class DaemonConfigTests(unittest.TestCase):
         with self.assertRaises(KeyError):
             DaemonConfig.from_dict({"poll_interval": 5})
 
+    def test_the_rediscover_interval_defaults(self):
+        # Optional so an existing config.toml keeps working untouched.
+        config = DaemonConfig.from_dict({"poll_interval": 5, "log_level": "INFO"})
+        self.assertEqual(config.sensor_rediscover_interval, 300.0)
+
+    def test_the_rediscover_interval_can_be_set(self):
+        config = DaemonConfig.from_dict(
+            {"poll_interval": 5, "log_level": "INFO", "sensor_rediscover_interval": 60},
+        )
+        self.assertEqual(config.sensor_rediscover_interval, 60)
+
 
 class FanCurveConfigTests(unittest.TestCase):
     def test_points_become_typed_pairs(self):

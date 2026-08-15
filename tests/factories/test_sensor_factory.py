@@ -80,6 +80,15 @@ class IPMIDiscoveryTests(unittest.TestCase):
         self.assertEqual(set(sensors), {"Temp", "Temp #2"})
         self.assertEqual(sensors["Temp #2"]._sensor_name, "Temp #2")
 
+    def test_a_currently_unreadable_sensor_still_gets_a_sensor(self):
+        # temperature_sensor_names() lists sensors the BMC cannot read yet.
+        # Deciding those do not exist is not this layer's call: it builds what
+        # the BMC lists, and SensorManager classifies the read failure. Skipping
+        # them here is what left the daemon with a fraction of its sensors after
+        # the BMC came up slowly.
+        sensors = discover_ipmi_sensors(FakeIPMI("Inlet Temp", "Exhaust Temp"))
+        self.assertIn("Exhaust Temp", sensors)
+
     def test_every_sensor_shares_the_one_ipmi_connection(self):
         ipmi = FakeIPMI("Inlet Temp", "Exhaust Temp")
         sensors = discover_ipmi_sensors(ipmi)

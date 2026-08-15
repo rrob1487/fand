@@ -9,10 +9,19 @@ from dataclasses import dataclass
 class DaemonConfig:
     poll_interval: float
     log_level: str
+    # Seconds between IPMI sensor re-scans. Optional, so an existing
+    # config.toml keeps working untouched. Bounds how long the daemon can run
+    # with an incomplete sensor set after the BMC comes up slowly; it is not
+    # how often sensors are read, which is poll_interval.
+    sensor_rediscover_interval: float = 300.0
 
     @classmethod
     def from_dict(cls, data: dict) -> "DaemonConfig":
-        return cls(poll_interval=data["poll_interval"], log_level=data["log_level"])
+        return cls(
+            poll_interval=data["poll_interval"],
+            log_level=data["log_level"],
+            sensor_rediscover_interval=data.get("sensor_rediscover_interval", 300.0),
+        )
 
 
 @dataclass(frozen=True)

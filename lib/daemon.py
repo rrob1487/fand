@@ -177,7 +177,11 @@ class Daemon:
 
     def _build_controller(self) -> Controller:
         vm_manager = VMManager(self._config_manager.vms)
-        sensor_manager = SensorManager(vm_manager, self._ipmi)
+        sensor_manager = SensorManager(
+            vm_manager,
+            self._ipmi,
+            rediscover_interval=self._config_manager.config.daemon.sensor_rediscover_interval,
+        )
         sensor_manager.discover()
         policy = Policy(self._config_manager.config.fan_curve, self._config_manager.config.safety)
         fan_controller = IPMIFanController(self._ipmi)
