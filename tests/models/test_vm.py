@@ -131,8 +131,10 @@ class ExampleFileTests(unittest.TestCase):
         self.assertIn("ga.sock", self.vm.qga.socket)
 
     def test_the_example_socket_is_reachable_under_the_units_writable_paths(self):
-        # fand.service grants ReadWritePaths=/opt/fand /run/fand /run/qemu, so
-        # an example pointing anywhere else would not work as copied.
+        # fand.service exposes /run/qemu inside the unit's mount namespace
+        # (ReadWritePaths=/opt/fand /run/fand -/run/qemu); ProtectSystem=strict
+        # hides the rest of the filesystem, so an example pointing anywhere
+        # else would not work as copied.
         self.assertTrue(self.vm.qga.socket.startswith("/run/qemu/"))
 
     def test_the_example_sets_a_gpu_temperature_limit(self):

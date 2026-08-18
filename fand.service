@@ -36,7 +36,15 @@ WatchdogSec=60
 # skipped with a warning, not that fan control stops.
 EnvironmentFile=-/opt/fand/.env
 WorkingDirectory=/opt/fand
-ReadWritePaths=/opt/fand /run/fand /run/qemu
+# Leading '-' on /run/qemu: libvirt creates that directory when the first VM
+# starts, so on a boot with no VMs it does not exist. Without the '-', the
+# bind-mount ProtectSystem=strict needs to make it writable fails and the unit
+# dies at 226/NAMESPACE -- taking ExecStopPost down with it -- so fand cannot
+# start at all until some VM happens to come up, leaving the fans pinned at
+# iDRAC's idle. The daemon only connect()s to guest-agent sockets and never
+# writes under /run/qemu, so a /run/qemu created later is picked up read-only
+# through the namespace without needing a restart.
+ReadWritePaths=/opt/fand /run/fand -/run/qemu
 RuntimeDirectory=fand
 
 #Security 
