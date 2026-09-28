@@ -30,6 +30,9 @@ class Notification:
     operating_mode: str
     alarms: tuple[str, ...]
     last_command_ok: bool | None
+    # Previously-good sensors lost for longer than the configured grace
+    # period. They have no reading, so they appear here instead of `readings`.
+    lost_sensors: tuple[str, ...] = ()
 
     @property
     def sensor_names(self) -> tuple[str, ...]:
@@ -53,9 +56,12 @@ class Notification:
         `None` selects everything and returns this notification unchanged.
         Names with no reading available are dropped silently — the caller knows
         which sensors it asked for and reports the gap, so this stays pure data.
+        Lost sensors are scoped the same way, so a notifier is only told about
+        a lost sensor it was configured to watch.
         """
         if names is None:
             return self
         by_name = {reading.name: reading for reading in self.readings}
         selected = tuple(by_name[name] for name in names if name in by_name)
-        return replace(self, readings=selected)
+        lost = tuple(name for name in names if name in self.lost_sensors)
+        return replace(self, readings=selected, lost_sensors=lost)

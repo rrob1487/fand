@@ -361,20 +361,31 @@ class SocketTests(LoopbackQGATestCase):
         client.exec_and_wait("/usr/bin/true", poll_interval=0.0, timeout=5.0)
         self.assertEqual(len(self.requests), 2)
 
-    def test_a_missing_socket_raises_an_os_error(self):
-        # Documents current behaviour: a VM that is simply not running fails
-        # fast, but as OSError rather than QGAError. GPUSensor only catches
-        # QGAError, so this reaches SensorManager's broad handler instead.
+    def test_a_missing_socket_raises_a_qga_error(self):
+        # A VM that is not running -- or whose socket was unlinked under it --
+        # fails fast, through the same QGAError path GPUSensor wraps.
         client = QGAClient(self.socket_path + ".absent")
-        with self.assertRaises(OSError):
+        with self.assertRaises(QGAError):
             client.guest_exec("/usr/bin/true")
 
+    def test_a_missing_socket_error_names_the_path(self):
+        # The production incident: the journal said only "[Errno 2] No such
+        # file or directory", with nothing to say which VM's socket was gone.
+        path = self.socket_path + ".absent"
+        with self.assertRaises(QGAError) as caught:
+            QGAClient(path).guest_exec("/usr/bin/true")
+        self.assertIn(path, str(caught.exception))
+
+    def test_the_socket_error_is_chained(self):
+        with self.assertRaises(QGAError) as caught:
+            QGAClient(self.socket_path + ".absent").guest_exec("/usr/bin/true")
+        self.assertIsInstance(caught.exception.__cause__, FileNotFoundError)
+
     def test_a_wedged_agent_raises_rather_than_hanging_forever(self):
-        # Also OSError rather than QGAError, for the same reason. The point
-        # here is that the socket timeout is honoured at all: without it the
-        # poll loop would block indefinitely on one bad VM.
+        # The point here is that the socket timeout is honoured at all: without
+        # it the poll loop would block indefinitely on one bad VM.
         self.never_respond()
-        with self.assertRaises(OSError):
+        with self.assertRaises(QGAError):
             self.client(timeout=0.2).guest_exec("/usr/bin/true")
 
 

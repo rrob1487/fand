@@ -60,6 +60,28 @@ fails leaves the previous set in place: an empty sensor set means no temperature
 data, which the policy layer correctly treats as an emergency, and a transient
 `ipmitool` failure must not be able to trigger that.
 
+## Lost Sensors
+
+| Key | Type | Required | Default | Notes |
+|-----|------|----------|---------|-------|
+| `safety.sensor_lost_grace_seconds` | number | no | `60` | Seconds a known-good sensor may stay unreadable before fan control is handed back to iDRAC. |
+
+A sensor is **known good** once it has produced a reading since the daemon
+started. When a known-good sensor stops reading — a VM's guest-agent socket
+disappears, say — for longer than `sensor_lost_grace_seconds`, the daemon enters
+`FAILSAFE`: it hands the fans back to iDRAC automatic mode and keeps them there
+until the sensor reads again, then resumes the curve. Driving the curve without
+it would ignore what may be the hottest component in the chassis.
+
+- `EMERGENCY` still wins. A sensor that *can* be read at `safety.max_temperature`
+  gets 100% fans and the shutdown path, never a handover.
+- Keep the grace above the iDRAC's routine one-poll sensor dropouts (about 15s),
+  or every blip hands the fans over.
+- Known-good status is held in memory. After a restart or a `SIGHUP` reload, a
+  sensor must read once before losing it counts. A VM that is powered off at
+  startup therefore does not trigger `FAILSAFE`.
+- Threshold notifiers fire on a sensor in this state; see `docs/notification.md`.
+
 ## Notification Configuration
 
 Notifier definitions live in `config/notification/*.toml`, one notifier per

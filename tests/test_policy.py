@@ -465,6 +465,147 @@ class StateSideEffectTests(PolicyTestCase):
 
 
 # ---------------------------------------------------------------------------
+# Lost sensors
+# ---------------------------------------------------------------------------
+class FakeClock:
+    """A time.monotonic stand-in. State.mark_sensor_lost stamps with the real
+    clock, so tests set lost_sensors directly against this one instead."""
+
+    def __init__(self, now=1_000.0):
+        self.now = now
+
+    def __call__(self) -> float:
+        return self.now
+
+
+class LostSensorFailsafeTests(unittest.TestCase):
+    """A sensor that was reading fine and then stops must not simply drop out
+    of the calculation. On Sep 1 that is what happened to the n8n V100: the
+    fans went from 19% to 10% and stayed there, blind, for 27 days."""
+
+    def setUp(self):
+        self.clock = FakeClock()
+        self.policy_ = Policy(
+            _curve(),
+            SafetyConfig(max_temperature=90.0, sensor_lost_grace_seconds=60.0),
+            clock=self.clock,
+        )
+
+    def lost_state(self, lost_for, *readings, name="n8n GPU") -> State:
+        state = _state(*(readings or (("CPU", 45.0),)))
+        state.lost_sensors[name] = self.clock.now - lost_for
+        return state
+
+    def test_within_the_grace_period_the_curve_still_drives(self):
+        # The iDRAC drops a CPU sensor for one poll routinely; that must not
+        # hand the fans over every time.
+        decision = self.policy_.evaluate(self.lost_state(59.0))
+        self.assertIs(decision.mode, OperatingMode.RUNNING)
+        self.assertFalse(decision.automatic_control)
+
+    def test_past_the_grace_period_control_goes_to_idrac(self):
+        decision = self.policy_.evaluate(self.lost_state(61.0))
+        self.assertIs(decision.mode, OperatingMode.FAILSAFE)
+        self.assertTrue(decision.automatic_control)
+        self.assertIsNone(decision.fan_speed_percent)
+
+    def test_exactly_at_the_grace_period_control_goes_to_idrac(self):
+        decision = self.policy_.evaluate(self.lost_state(60.0))
+        self.assertIs(decision.mode, OperatingMode.FAILSAFE)
+
+    def test_the_grace_period_is_configurable(self):
+        policy = Policy(
+            _curve(),
+            SafetyConfig(max_temperature=90.0, sensor_lost_grace_seconds=300.0),
+            clock=self.clock,
+        )
+        self.assertIs(policy.evaluate(self.lost_state(200.0)).mode, OperatingMode.RUNNING)
+
+    def test_failsafe_never_requests_shutdown(self):
+        policy = Policy(
+            _curve(),
+            SafetyConfig(
+                max_temperature=90.0, shutdown_on_emergency=True,
+                sensor_lost_grace_seconds=60.0,
+            ),
+            clock=self.clock,
+        )
+        self.assertFalse(policy.evaluate(self.lost_state(120.0)).shutdown_requested)
+
+    def test_a_visible_emergency_beats_failsafe(self):
+        # Cooling must win: a sensor we can still see at the limit gets 100%
+        # and the shutdown path, never a handover to iDRAC.
+        state = self.lost_state(120.0, ("CPU", 95.0))
+        decision = self.policy_.evaluate(state)
+        self.assertIs(decision.mode, OperatingMode.EMERGENCY)
+        self.assertEqual(decision.fan_speed_percent, 100.0)
+        self.assertFalse(decision.automatic_control)
+
+    def test_a_latched_emergency_beats_failsafe(self):
+        policy = Policy(
+            _curve(),
+            SafetyConfig(
+                max_temperature=90.0, recovery_margin_c=5.0,
+                sensor_lost_grace_seconds=60.0,
+            ),
+            clock=self.clock,
+        )
+        state = self.lost_state(120.0, ("CPU", 87.0))
+        state.set_mode(OperatingMode.EMERGENCY)
+        self.assertIs(policy.evaluate(state).mode, OperatingMode.EMERGENCY)
+
+    def test_losing_every_sensor_is_still_an_emergency(self):
+        # No readings at all is the existing full-speed branch, not FAILSAFE.
+        state = State()
+        state.lost_sensors["n8n GPU"] = self.clock.now - 120.0
+        self.assertIs(self.policy_.evaluate(state).mode, OperatingMode.EMERGENCY)
+
+    def test_the_unmonitored_sensors_are_recorded_in_state(self):
+        state = self.lost_state(120.0)
+        state.lost_sensors["Temp"] = self.clock.now - 5.0   # still in grace
+        self.policy_.evaluate(state)
+        self.assertEqual(state.unmonitored_sensors, ("n8n GPU",))
+
+    def test_unmonitored_sensors_are_recorded_even_in_emergency(self):
+        # So an emergency notification still says what the daemon cannot see.
+        state = self.lost_state(120.0, ("CPU", 95.0))
+        self.policy_.evaluate(state)
+        self.assertEqual(state.unmonitored_sensors, ("n8n GPU",))
+
+    def test_unmonitored_sensors_are_sorted(self):
+        state = self.lost_state(120.0, name="b GPU")
+        state.lost_sensors["a GPU"] = self.clock.now - 120.0
+        self.policy_.evaluate(state)
+        self.assertEqual(state.unmonitored_sensors, ("a GPU", "b GPU"))
+
+    def test_failsafe_is_written_to_state(self):
+        state = self.lost_state(120.0)
+        state.set_requested_fan_speed(40.0)
+        self.policy_.evaluate(state)
+        self.assertIs(state.mode, OperatingMode.FAILSAFE)
+        self.assertIsNone(state.requested_fan_speed)
+
+    def test_the_sensor_returning_resumes_the_curve_undamped(self):
+        # Leaving FAILSAFE there is no previous speed of ours to damp from.
+        state = self.lost_state(120.0, ("CPU", 45.0))
+        self.policy_.evaluate(state)
+        state.lost_sensors.clear()
+        decision = self.policy_.evaluate(state)
+        self.assertIs(decision.mode, OperatingMode.RUNNING)
+        self.assertEqual(
+            decision.fan_speed_percent,
+            _interpolate_fan_percent(45.0, _curve().points),
+        )
+        self.assertEqual(state.unmonitored_sensors, ())
+
+    def test_the_grace_period_elapsing_is_what_flips_the_mode(self):
+        state = self.lost_state(30.0)
+        self.assertIs(self.policy_.evaluate(state).mode, OperatingMode.RUNNING)
+        self.clock.now += 30.0
+        self.assertIs(self.policy_.evaluate(state).mode, OperatingMode.FAILSAFE)
+
+
+# ---------------------------------------------------------------------------
 # Determinism
 # ---------------------------------------------------------------------------
 class DeterminismTests(PolicyTestCase):

@@ -42,14 +42,23 @@ class Trigger(ABC):
 
 
 class ThresholdTrigger(Trigger):
-    """Active while the hottest selected sensor is at or above a temperature."""
+    """Active while the hottest selected sensor is at or above a temperature,
+    or while any selected sensor has been lost past its grace period.
+
+    A lost sensor counts as over the threshold because nothing says it is not:
+    the V100 that went unread for 27 days was exactly the sensor a threshold
+    alert existed to watch.
+    """
 
     def __init__(self, sensors: tuple[str, ...] | None, temperature_c: float) -> None:
         super().__init__(sensors)
         self._temperature_c = temperature_c
 
     def is_active(self, notification: Notification) -> bool:
-        hottest = notification.with_sensors(self._sensors).hottest
+        scoped = notification.with_sensors(self._sensors)
+        if scoped.lost_sensors:
+            return True
+        hottest = scoped.hottest
         if hottest is None:
             # No reading available for any selected sensor. A notifier that
             # cannot see a temperature cannot claim a threshold was crossed.

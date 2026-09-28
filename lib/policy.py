@@ -8,7 +8,9 @@ to execute.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
+from typing import Callable
 
 from lib.models.config import FanCurveConfig, FanCurvePoint, SafetyConfig
 from lib.state import OperatingMode, State
@@ -18,9 +20,11 @@ _OVER_TEMPERATURE_ALARM = "over_temperature"
 
 @dataclass(frozen=True)
 class FanDecision:
-    fan_speed_percent: float
+    # None when automatic_control is set: iDRAC picks the speed, not us.
+    fan_speed_percent: float | None
     mode: OperatingMode
     shutdown_requested: bool
+    automatic_control: bool = False
 
 
 def _interpolate_fan_percent(temperature: float, points: tuple[FanCurvePoint, ...]) -> float:
@@ -45,11 +49,31 @@ def _interpolate_fan_percent(temperature: float, points: tuple[FanCurvePoint, ..
 
 
 class Policy:
-    def __init__(self, fan_curve: FanCurveConfig, safety: SafetyConfig) -> None:
+    def __init__(
+        self,
+        fan_curve: FanCurveConfig,
+        safety: SafetyConfig,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
         self._fan_curve = fan_curve
         self._safety = safety
+        # Must be the clock State.mark_sensor_lost() stamps with. Injectable
+        # so the grace period is testable without sleeping.
+        self._clock = clock
+
+    def _overdue_lost_sensors(self, state: State) -> tuple[str, ...]:
+        now = self._clock()
+        grace = self._safety.sensor_lost_grace_seconds
+        return tuple(sorted(
+            name for name, since in state.lost_sensors.items() if now - since >= grace
+        ))
 
     def evaluate(self, state: State) -> FanDecision:
+        # Recorded whatever the mode, so a notification sent during an
+        # EMERGENCY still says which sensors the daemon has lost sight of.
+        unmonitored = self._overdue_lost_sensors(state)
+        state.set_unmonitored_sensors(unmonitored)
+
         if not state.temperatures:
             # Unknown temperature: fail safe to max cooling, no hysteresis.
             decision = FanDecision(
@@ -81,6 +105,21 @@ class Policy:
             mode = OperatingMode.EMERGENCY
             target = 100.0
             shutdown_requested = self._safety.shutdown_on_emergency
+        elif unmonitored:
+            # Checked only after both EMERGENCY branches: a sensor we can still
+            # see at the limit gets 100% and a shutdown, never a handover.
+            # Otherwise the curve would be driven by an incomplete picture --
+            # dropping the hottest sensor lowers the fans exactly when they
+            # may be needed -- so iDRAC gets the fans back until it returns.
+            state.clear_alarm(_OVER_TEMPERATURE_ALARM)
+            state.set_mode(OperatingMode.FAILSAFE)
+            state.set_requested_fan_speed(None)
+            return FanDecision(
+                fan_speed_percent=None,
+                mode=OperatingMode.FAILSAFE,
+                shutdown_requested=False,
+                automatic_control=True,
+            )
         elif curve_max_temp is not None and hottest >= curve_max_temp:
             mode = OperatingMode.WARNING
             target = _interpolate_fan_percent(hottest, self._fan_curve.points)

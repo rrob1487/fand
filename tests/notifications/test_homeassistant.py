@@ -160,6 +160,24 @@ class PayloadTests(HomeAssistantTestCase):
         self.assertEqual(body["state"], "EMERGENCY")
         self.assertEqual(body["attributes"]["alarms"], ["over_temperature"])
 
+    def test_operating_mode_entity_carries_lost_sensors(self):
+        self.endpoint().send(
+            _notification(
+                ("CPU1 Temp", 40.0),
+                operating_mode="FAILSAFE",
+                fan_speed_percent=None,
+                lost_sensors=("n8n GPU",),
+            )
+        )
+        body = self.bodies()["/api/states/sensor.fand_operating_mode"]
+        self.assertEqual(body["state"], "FAILSAFE")
+        self.assertEqual(body["attributes"]["lost_sensors"], ["n8n GPU"])
+
+    def test_no_lost_sensors_is_an_empty_list(self):
+        self.endpoint().send(_notification(("CPU1 Temp", 40.0)))
+        body = self.bodies()["/api/states/sensor.fand_operating_mode"]
+        self.assertEqual(body["attributes"]["lost_sensors"], [])
+
 
 class FailureClassificationTests(HomeAssistantTestCase):
     def test_all_requests_are_attempted_despite_a_failure(self):

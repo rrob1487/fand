@@ -8,7 +8,7 @@ from lib.notifications.notification import Notification, SensorReading
 from lib.notifications.trigger import GeneralTrigger, ThresholdTrigger, Trigger
 
 
-def _notification(*readings: tuple[str, float]) -> Notification:
+def _notification(*readings: tuple[str, float], lost=()) -> Notification:
     return Notification(
         timestamp=1_700_000_000.0,
         readings=tuple(
@@ -19,6 +19,7 @@ def _notification(*readings: tuple[str, float]) -> Notification:
         operating_mode="RUNNING",
         alarms=(),
         last_command_ok=True,
+        lost_sensors=tuple(lost),
     )
 
 
@@ -93,6 +94,38 @@ class ThresholdScopingTests(unittest.TestCase):
         notification = _notification(("CPU1 Temp", 95.0), ("n8n GPU", 40.0))
         trigger.is_active(notification)
         self.assertEqual(len(notification.readings), 2)
+
+
+class ThresholdLostSensorTests(unittest.TestCase):
+    """A sensor lost past its grace period counts as over the threshold:
+    nothing says it is not."""
+
+    def test_a_lost_sensor_activates_an_unscoped_trigger(self):
+        trigger = ThresholdTrigger(sensors=None, temperature_c=80.0)
+        self.assertTrue(
+            trigger.is_active(_notification(("CPU1 Temp", 40.0), lost=("n8n GPU",))),
+        )
+
+    def test_a_lost_sensor_activates_with_no_readings_at_all(self):
+        trigger = ThresholdTrigger(sensors=None, temperature_c=80.0)
+        self.assertTrue(trigger.is_active(_notification(lost=("n8n GPU",))))
+
+    def test_a_selected_lost_sensor_activates(self):
+        trigger = ThresholdTrigger(sensors=("n8n GPU",), temperature_c=80.0)
+        self.assertTrue(
+            trigger.is_active(_notification(("CPU1 Temp", 40.0), lost=("n8n GPU",))),
+        )
+
+    def test_a_lost_sensor_outside_the_selection_is_ignored(self):
+        # Same scoping rule as a hot reading outside the selection.
+        trigger = ThresholdTrigger(sensors=("CPU1 Temp",), temperature_c=80.0)
+        self.assertFalse(
+            trigger.is_active(_notification(("CPU1 Temp", 40.0), lost=("n8n GPU",))),
+        )
+
+    def test_without_lost_sensors_the_threshold_still_decides(self):
+        trigger = ThresholdTrigger(sensors=None, temperature_c=80.0)
+        self.assertFalse(trigger.is_active(_notification(("CPU1 Temp", 40.0))))
 
 
 class GeneralTriggerTests(unittest.TestCase):

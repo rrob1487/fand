@@ -565,6 +565,98 @@ class CoolingWinsTheRaceTests(ControllerTestCase):
         self.assertEqual(fans.speeds, [100.0, 100.0, 100.0])
 
 
+def _failsafe() -> FanDecision:
+    return FanDecision(
+        fan_speed_percent=None, mode=OperatingMode.FAILSAFE,
+        shutdown_requested=False, automatic_control=True,
+    )
+
+
+class FailsafeTests(ControllerTestCase):
+    """Policy lost sight of a sensor for too long: the fans go back to iDRAC."""
+
+    def setUp(self):
+        self.no_backoff()
+
+    def test_automatic_control_is_enabled(self):
+        controller = self.build(_failsafe())
+        with self.assertLogs(_LOGGER, level="WARNING"):
+            controller.run_cycle()
+        self.assertEqual(self.fans.releases, 1)
+
+    def test_no_manual_speed_is_set(self):
+        controller = self.build(_failsafe())
+        with self.assertLogs(_LOGGER, level="WARNING"):
+            controller.run_cycle()
+        self.assertEqual(self.fans.speeds, [])
+
+    def test_automatic_control_is_reasserted_every_cycle(self):
+        # Idempotent, and a BMC that reset would otherwise stay in whatever
+        # mode it came back up in.
+        controller = self.build(_failsafe())
+        with self.assertLogs(_LOGGER, level="WARNING"):
+            controller.run_cycle()
+            controller.run_cycle()
+        self.assertEqual(self.fans.releases, 2)
+
+    def test_a_success_is_recorded(self):
+        controller = self.build(_failsafe())
+        with self.assertLogs(_LOGGER, level="WARNING"):
+            controller.run_cycle()
+        self.assertTrue(controller.state.last_command_result.success)
+
+    def test_a_failure_is_retried_then_recorded_rather_than_raised(self):
+        fans = FakeFanController([], release_error=IPMIError("BMC busy"))
+        controller = self.build(_failsafe(), fans=fans)
+        with self.assertLogs(_LOGGER, level="ERROR") as logs:
+            controller.run_cycle()
+        self.assertEqual(fans.releases, 3)
+        self.assertFalse(controller.state.last_command_result.success)
+        self.assertTrue(
+            [line for line in logs.output if "enable automatic fan control" in line],
+        )
+
+    def test_the_cycle_still_dispatches_notifications(self):
+        manager = FakeNotificationManager([])
+        controller = self.build(_failsafe(), manager=manager)
+        with self.assertLogs(_LOGGER, level="WARNING"):
+            controller.run_cycle()
+        self.assertEqual(
+            self.log, ["poll", "evaluate", "enable_automatic_control", "dispatch"],
+        )
+
+    def test_the_handover_names_the_lost_sensors(self):
+        controller = self.build(_failsafe())
+        controller.state.set_unmonitored_sensors(("n8n GPU",))
+        with self.assertLogs(_LOGGER, level="WARNING") as logs:
+            controller.run_cycle()
+        self.assertIn("n8n GPU", logs.output[0])
+        self.assertIn("WARNING", logs.output[0])
+
+    def test_the_handover_is_logged_once(self):
+        controller = self.build(_failsafe())
+        with self.assertLogs(_LOGGER, level="INFO") as logs:
+            controller.run_cycle()
+            controller.run_cycle()
+        self.assertEqual(len(logs.output), 1)
+
+    def test_returning_to_the_curve_retakes_manual_control(self):
+        controller = self.build(_failsafe())
+        with self.assertLogs(_LOGGER, level="INFO") as logs:
+            controller.run_cycle()
+            controller._policy._decision = _decision(speed=40.0)
+            controller.run_cycle()
+        self.assertEqual(self.fans.speeds, [40.0])
+        self.assertIn("iDRAC auto -> 40%", logs.output[-1])
+
+    def test_dry_run_touches_no_hardware(self):
+        controller = self.build(_failsafe(), dry_run=True)
+        with self.assertLogs(_LOGGER, level="WARNING"):
+            controller.run_cycle()
+        self.assertEqual(self.fans.releases, 0)
+        self.assertIn("dry-run", controller.state.last_command_result.detail)
+
+
 class DecisionLoggingTests(ControllerTestCase):
     """Logged on change only. A steady machine polls every few seconds forever;
     repeating an identical line would bury everything that matters."""

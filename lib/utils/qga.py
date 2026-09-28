@@ -52,11 +52,17 @@ class QGAClient:
         if arguments is not None:
             payload["arguments"] = arguments
 
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
-            sock.settimeout(self._timeout)
-            sock.connect(self._socket_path)
-            sock.sendall(json.dumps(payload).encode())
-            raw = self._read_response(sock)
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+                sock.settimeout(self._timeout)
+                sock.connect(self._socket_path)
+                sock.sendall(json.dumps(payload).encode())
+                raw = self._read_response(sock)
+        except OSError as exc:
+            # Named, because a bare "[Errno 2] No such file or directory" in the
+            # journal does not say which VM's socket vanished. This happened in
+            # production when another VM's unit deleted the shared /run/qemu.
+            raise QGAError(f"{self._socket_path}: {exc}") from exc
 
         response = json.loads(raw)
         if "error" in response:

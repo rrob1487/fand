@@ -536,6 +536,73 @@ class RediscoveryTests(SensorManagerTestCase):
 
 
 # ---------------------------------------------------------------------------
+# Lost sensors
+# ---------------------------------------------------------------------------
+class LostSensorTrackingTests(SensorManagerTestCase):
+    """SensorManager records when a known-good sensor was lost; Policy decides
+    whether that has gone on too long."""
+
+    def fail(self, manager, sensor):
+        sensor.error = RuntimeError("[Errno 2] No such file or directory")
+        with self.assertLogs(_LOGGER, level="WARNING"):
+            manager.poll(self.state)
+
+    def test_a_known_good_sensor_that_fails_is_marked_lost(self):
+        gpu = FakeSensor(57.0)
+        manager = self.manager(**{"n8n GPU": gpu})
+        manager.poll(self.state)
+        self.fail(manager, gpu)
+        self.assertIn("n8n GPU", self.state.lost_sensors)
+
+    def test_a_sensor_that_never_read_is_not_marked_lost(self):
+        # A VM that is powered off was never part of the picture.
+        manager = self.manager(**{"n8n GPU": FakeSensor(error=RuntimeError("off"))})
+        with self.assertLogs(_LOGGER, level="WARNING"):
+            manager.poll(self.state)
+        self.assertEqual(self.state.lost_sensors, {})
+
+    def test_the_loss_is_timed_from_the_first_failure(self):
+        # Re-stamping every poll would restart the grace period forever.
+        gpu = FakeSensor(57.0)
+        manager = self.manager(**{"n8n GPU": gpu})
+        manager.poll(self.state)
+        self.fail(manager, gpu)
+        first = self.state.lost_sensors["n8n GPU"]
+        manager.poll(self.state)   # still failing; already logged once
+        self.assertEqual(self.state.lost_sensors["n8n GPU"], first)
+
+    def test_recovery_clears_the_loss(self):
+        gpu = FakeSensor(57.0)
+        manager = self.manager(**{"n8n GPU": gpu})
+        manager.poll(self.state)
+        self.fail(manager, gpu)
+        gpu.error = None
+        with self.assertLogs(_LOGGER, level="INFO"):
+            manager.poll(self.state)
+        self.assertEqual(self.state.lost_sensors, {})
+
+    def test_a_sensor_that_vanishes_from_the_bmc_is_no_longer_lost(self):
+        ipmi = FakeIPMI("Inlet Temp", "Exhaust Temp")
+        manager = self.manager(ipmi=ipmi, rediscover_interval=_NEVER)
+        manager.discover()
+        manager.poll(self.state)
+        self.state.mark_sensor_lost("Exhaust Temp")
+        ipmi.names.remove("Exhaust Temp")
+        manager._rediscover_interval = 0
+        with self.assertLogs(_LOGGER, level="INFO"):
+            manager.poll(self.state)
+        self.assertNotIn("Exhaust Temp", self.state.lost_sensors)
+        self.assertNotIn("Exhaust Temp", manager._known_good)
+
+    def test_one_lost_sensor_does_not_mark_the_others(self):
+        gpu = FakeSensor(57.0)
+        manager = self.manager(**{"n8n GPU": gpu, "Inlet Temp": FakeSensor(22.0)})
+        manager.poll(self.state)
+        self.fail(manager, gpu)
+        self.assertEqual(set(self.state.lost_sensors), {"n8n GPU"})
+
+
+# ---------------------------------------------------------------------------
 # Re-discovery failure
 # ---------------------------------------------------------------------------
 class RediscoveryFailureTests(SensorManagerTestCase):

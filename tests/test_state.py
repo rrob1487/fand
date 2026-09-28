@@ -169,6 +169,46 @@ class CommandResultTests(StateTestCase):
         self.assertEqual(result.timestamp, _NOW + 5.0)
 
 
+class LostSensorTests(StateTestCase):
+    def setUp(self):
+        super().setUp()
+        self.monotonic = 500.0
+        patcher = patch("lib.state.time.monotonic", lambda: self.monotonic)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_a_new_state_has_no_lost_sensors(self):
+        self.assertEqual(self.state.lost_sensors, {})
+        self.assertEqual(self.state.unmonitored_sensors, ())
+
+    def test_a_loss_is_stamped_with_the_monotonic_clock(self):
+        # Monotonic, because Policy compares it against its own monotonic
+        # clock; a wall-clock step would shorten or stretch the grace period.
+        self.state.mark_sensor_lost("n8n GPU")
+        self.assertEqual(self.state.lost_sensors["n8n GPU"], 500.0)
+
+    def test_marking_again_keeps_the_first_timestamp(self):
+        self.state.mark_sensor_lost("n8n GPU")
+        self.monotonic = 560.0
+        self.state.mark_sensor_lost("n8n GPU")
+        self.assertEqual(self.state.lost_sensors["n8n GPU"], 500.0)
+
+    def test_clearing_forgets_the_loss(self):
+        self.state.mark_sensor_lost("n8n GPU")
+        self.state.clear_sensor_lost("n8n GPU")
+        self.assertEqual(self.state.lost_sensors, {})
+
+    def test_clearing_an_unknown_sensor_is_a_no_op(self):
+        self.state.clear_sensor_lost("never lost")
+        self.assertEqual(self.state.lost_sensors, {})
+
+    def test_marking_lost_does_not_change_the_mode(self):
+        # Policy decides what a lost sensor means.
+        self.state.mark_sensor_lost("n8n GPU")
+        self.assertIs(self.state.mode, OperatingMode.STARTING)
+        self.assertEqual(self.state.unmonitored_sensors, ())
+
+
 class NoEvaluationTests(StateTestCase):
     """State must never draw a conclusion. Policy owns every decision, and the
     emergency latch depends on State reporting exactly what it was told."""

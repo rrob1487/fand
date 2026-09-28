@@ -134,6 +134,17 @@ class SafetyConfigTests(unittest.TestCase):
         self.assertTrue(config.shutdown_on_emergency)
         self.assertEqual(config.recovery_margin_c, 5)
 
+    def test_the_sensor_lost_grace_defaults_to_a_minute(self):
+        # Optional so an existing config.toml keeps working untouched.
+        config = SafetyConfig.from_dict({"max_temperature": 90})
+        self.assertEqual(config.sensor_lost_grace_seconds, 60.0)
+
+    def test_the_sensor_lost_grace_is_read_when_present(self):
+        config = SafetyConfig.from_dict(
+            {"max_temperature": 90, "sensor_lost_grace_seconds": 120},
+        )
+        self.assertEqual(config.sensor_lost_grace_seconds, 120)
+
 
 class WatchdogConfigTests(unittest.TestCase):
     def test_enabled_is_required(self):
@@ -250,6 +261,11 @@ class ExampleFileTests(unittest.TestCase):
 
     def test_the_example_sets_a_recovery_margin(self):
         self.assertGreater(self.config.safety.recovery_margin_c, 0)
+
+    def test_the_example_grace_outlasts_a_bmc_blip(self):
+        # The iDRAC routinely drops a CPU sensor for one ~14s poll. A grace
+        # period shorter than that would hand the fans to iDRAC every time.
+        self.assertGreaterEqual(self.config.safety.sensor_lost_grace_seconds, 30)
 
     def test_the_example_matches_the_shipped_unit_file(self):
         # fand.service is Type=notify with WatchdogSec set, so the example must

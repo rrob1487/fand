@@ -95,6 +95,26 @@ class WithSensorsTests(unittest.TestCase):
         self.assertEqual(filtered.hottest.name, "CPU1 Temp")
 
 
+class LostSensorScopingTests(unittest.TestCase):
+    def setUp(self):
+        self.n = _notification(
+            ("CPU1 Temp", 40.0), lost_sensors=("n8n GPU", "vm2 GPU"),
+        )
+
+    def test_lost_sensors_default_to_none(self):
+        self.assertEqual(_notification().lost_sensors, ())
+
+    def test_none_keeps_every_lost_sensor(self):
+        self.assertEqual(self.n.with_sensors(None).lost_sensors, ("n8n GPU", "vm2 GPU"))
+
+    def test_only_selected_lost_sensors_are_kept(self):
+        filtered = self.n.with_sensors(("CPU1 Temp", "n8n GPU"))
+        self.assertEqual(filtered.lost_sensors, ("n8n GPU",))
+
+    def test_unselected_lost_sensors_are_dropped(self):
+        self.assertEqual(self.n.with_sensors(("CPU1 Temp",)).lost_sensors, ())
+
+
 class ImmutabilityTests(unittest.TestCase):
     """The payload crosses a thread boundary, so it must be a detached
     snapshot of primitives rather than a view of mutable State."""

@@ -205,6 +205,7 @@ class NotificationManager:
             operating_mode=state.mode.name,
             alarms=tuple(sorted(state.alarms)),
             last_command_ok=None if result is None else result.success,
+            lost_sensors=tuple(sorted(state.unmonitored_sensors)),
         )
 
     # ------------------------------------------------------------------

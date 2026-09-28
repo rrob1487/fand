@@ -141,6 +141,7 @@ class HomeAssistantEndpoint(NotificationEndpoint):
                     "attributes": {
                         "friendly_name": "fand operating mode",
                         "alarms": list(notification.alarms),
+                        "lost_sensors": list(notification.lost_sensors),
                     },
                 },
             )

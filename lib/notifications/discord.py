@@ -35,6 +35,7 @@ _MODE_COLOURS = {
     "RUNNING": 0x2ECC71,    # green
     "WARNING": 0xF39C12,    # amber
     "EMERGENCY": 0xE74C3C,  # red
+    "FAILSAFE": 0x9B59B6,   # purple
 }
 _DEFAULT_COLOUR = 0x95A5A6
 
@@ -95,7 +96,13 @@ class DiscordEndpoint(NotificationEndpoint):
         }
 
         hottest = notification.hottest
-        if hottest is not None:
+        if notification.lost_sensors:
+            # Leads over the hottest reading: a sensor we cannot see may be
+            # hotter than every sensor we can.
+            embed["description"] = (
+                f"Lost: **{', '.join(notification.lost_sensors)}** (no reading)"
+            )
+        elif hottest is not None:
             embed["description"] = (
                 f"Hottest: **{hottest.name}** {hottest.value_c:.1f} °C"
             )
@@ -103,7 +110,9 @@ class DiscordEndpoint(NotificationEndpoint):
         embed["fields"].append(
             {
                 "name": "Fan speed",
-                "value": _format_fan_speed(notification.fan_speed_percent),
+                "value": _format_fan_speed(
+                    notification.fan_speed_percent, notification.operating_mode,
+                ),
                 "inline": True,
             }
         )
@@ -114,6 +123,10 @@ class DiscordEndpoint(NotificationEndpoint):
         if notification.readings:
             embed["fields"].append(
                 {"name": "Sensors", "value": _format_sensors(notification.readings)}
+            )
+        if notification.lost_sensors:
+            embed["fields"].append(
+                {"name": "Lost sensors", "value": ", ".join(notification.lost_sensors)}
             )
         if notification.alarms:
             embed["fields"].append(
@@ -127,8 +140,10 @@ def _iso8601(timestamp: float) -> str:
     return datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat()
 
 
-def _format_fan_speed(percent: float | None) -> str:
-    return "unknown" if percent is None else f"{percent:.0f}%"
+def _format_fan_speed(percent: float | None, operating_mode: str = "") -> str:
+    if percent is None:
+        return "iDRAC auto" if operating_mode == "FAILSAFE" else "unknown"
+    return f"{percent:.0f}%"
 
 
 def _format_sensors(readings: tuple) -> str:

@@ -31,6 +31,10 @@ class SensorManager:
         self._rediscover_interval = rediscover_interval
         self._sensors: dict[str, Sensor] = {}
         self._failed_sensors: set[str] = set()
+        # Sensors that have produced at least one reading. Only these count as
+        # lost when they fail: a sensor that has never read -- a VM that is
+        # powered off, say -- was never part of the picture to begin with.
+        self._known_good: set[str] = set()
         # Started now, not at zero: a manager that has just been built is not
         # overdue for a re-scan, and the daemon calls discover() itself.
         self._last_discovery = time.monotonic()
@@ -67,10 +71,14 @@ class SensorManager:
                     self._failed_sensors.add(name)
                 state.clear_temperature(name)
                 state.set_alarm(f"sensor_failure:{name}")
+                if name in self._known_good:
+                    state.mark_sensor_lost(name)
                 continue
             if name in self._failed_sensors:
                 _log.info("sensor %r recovered", name)
                 self._failed_sensors.discard(name)
+            self._known_good.add(name)
+            state.clear_sensor_lost(name)
             state.update_temperature(name, value)
             state.clear_alarm(f"sensor_failure:{name}")
             _log.debug("sensor %r = %.1f", name, value)
@@ -113,6 +121,8 @@ class SensorManager:
         }
         for name in removed:
             self._failed_sensors.discard(name)
+            self._known_good.discard(name)
+            state.clear_sensor_lost(name)
             state.clear_temperature(name)
             state.clear_alarm(f"sensor_failure:{name}")
 

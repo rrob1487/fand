@@ -33,6 +33,12 @@ shutdown_on_emergency = false
 # max_temperature before the daemon leaves EMERGENCY. Prevents mode/fan
 # speed from flapping when a sensor hovers right at the limit.
 recovery_margin_c = 5
+# Seconds a sensor that has been reading fine may stay unreadable before the
+# daemon gives fan control back to iDRAC automatic mode (FAILSAFE) until it
+# returns. Driving the curve without it would ignore what may be the hottest
+# component. Keep this above the iDRAC's brief sensor dropouts (~15s). A sensor
+# that has never read since startup -- a VM that is powered off -- does not count.
+sensor_lost_grace_seconds = 60
 
 [watchdog]
 enabled = true

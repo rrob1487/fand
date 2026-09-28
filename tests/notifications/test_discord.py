@@ -75,6 +75,7 @@ class EmbedContentTests(DiscordTestCase):
             ("WARNING", 0xF39C12),
             ("EMERGENCY", 0xE74C3C),
             ("STARTING", 0x95A5A6),
+            ("FAILSAFE", 0x9B59B6),
         ):
             with self.subTest(mode=mode):
                 self.endpoint().send(
@@ -138,6 +139,38 @@ class EmbedContentTests(DiscordTestCase):
     def test_timestamp_is_iso8601(self):
         self.endpoint().send(_notification(("CPU1 Temp", 80.0)))
         self.assertTrue(self.embed()["timestamp"].startswith("2023-11-14T"))
+
+
+class LostSensorEmbedTests(DiscordTestCase):
+    def failsafe(self, *readings) -> Notification:
+        return _notification(
+            *readings, operating_mode="FAILSAFE", fan_speed_percent=None,
+            lost_sensors=("n8n GPU",),
+        )
+
+    def test_a_lost_sensor_is_the_headline(self):
+        # Over the hottest visible reading: the lost one may be hotter.
+        self.endpoint().send(self.failsafe(("CPU1 Temp", 45.0)))
+        self.assertIn("n8n GPU", self.embed()["description"])
+        self.assertNotIn("CPU1 Temp", self.embed()["description"])
+
+    def test_a_headline_even_without_readings(self):
+        self.endpoint().send(self.failsafe())
+        self.assertIn("n8n GPU", self.embed()["description"])
+
+    def test_lost_sensors_field(self):
+        self.endpoint().send(self.failsafe(("CPU1 Temp", 45.0)))
+        fields = {f["name"]: f["value"] for f in self.embed()["fields"]}
+        self.assertEqual(fields["Lost sensors"], "n8n GPU")
+
+    def test_no_lost_sensors_field_when_none_are_lost(self):
+        self.endpoint().send(_notification(("CPU1 Temp", 80.0)))
+        self.assertNotIn("Lost sensors", [f["name"] for f in self.embed()["fields"]])
+
+    def test_fan_speed_reads_idrac_auto_in_failsafe(self):
+        self.endpoint().send(self.failsafe(("CPU1 Temp", 45.0)))
+        fields = {f["name"]: f["value"] for f in self.embed()["fields"]}
+        self.assertEqual(fields["Fan speed"], "iDRAC auto")
 
 
 class FieldLimitTests(DiscordTestCase):

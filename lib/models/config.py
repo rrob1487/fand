@@ -49,6 +49,10 @@ class SafetyConfig:
     max_temperature: float
     shutdown_on_emergency: bool = False
     recovery_margin_c: float = 0.0
+    # Seconds a previously-good sensor may stay unreadable before fan control
+    # is handed back to iDRAC. Optional, so an existing config.toml keeps
+    # working untouched.
+    sensor_lost_grace_seconds: float = 60.0
 
     @classmethod
     def from_dict(cls, data: dict) -> "SafetyConfig":
@@ -56,6 +60,7 @@ class SafetyConfig:
             max_temperature=data["max_temperature"],
             shutdown_on_emergency=data.get("shutdown_on_emergency", False),
             recovery_margin_c=data.get("recovery_margin_c", 0.0),
+            sensor_lost_grace_seconds=data.get("sensor_lost_grace_seconds", 60.0),
         )
 
 

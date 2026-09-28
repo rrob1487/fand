@@ -467,11 +467,15 @@ The threshold comparison is:
 
 ```text
 hottest selected sensor >= configured threshold
+    OR
+any selected sensor lost for longer than safety.sensor_lost_grace_seconds
 ```
 
 The relevant temperature is the **hottest reading among the notifier's selected sensors**. When `Sensors` is omitted, every available sensor is considered, so the notifier tracks the hottest sensor in the system — the same value the fan policy evaluates.
 
-A notifier with no readings available for its selected sensors is not active. A notifier that cannot see a temperature cannot claim a threshold was crossed.
+**A lost sensor counts as over the threshold.** A sensor that was reading fine and then stays unreadable past `safety.sensor_lost_grace_seconds` — the same condition that puts the daemon in `FAILSAFE` — activates the notifier as if its temperature had crossed `Temperature`, because nothing says it has not. The usual rules apply unchanged: it must be among the notifier's selected sensors, the first notification is queued immediately, further ones follow every `Interval`, and the notifier goes inactive once the sensor reads again. The payload lists it under `lost_sensors`. A sensor that is still within its grace period, or that has never read since the daemon started, does not activate the notifier.
+
+A notifier with no readings available for its selected sensors, and none of them lost, is not active. A notifier that cannot see a temperature cannot claim a threshold was crossed.
 
 `Temperature` is expressed in degrees Celsius and must not be negative. A negative threshold would be satisfied by every reading a server sensor can produce, leaving the notifier permanently active — that is a general trigger written as a threshold, and is rejected as a configuration error.
 

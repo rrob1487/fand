@@ -162,12 +162,11 @@ class FailureTests(unittest.TestCase):
             sensor.read()
         self.assertIs(caught.exception.__cause__, original)
 
-    def test_a_socket_error_is_not_wrapped(self):
-        # Documents current behaviour rather than endorsing it: QGAClient does
-        # not convert socket errors into QGAError, so an unreachable guest
-        # agent escapes as OSError. SensorManager's broad except still records
-        # it as a sensor failure, so the outcome is correct -- but the type is
-        # inconsistent with this module's own contract.
+    def test_a_raw_socket_error_is_not_wrapped(self):
+        # GPUSensor wraps QGAError only. The real QGAClient converts socket
+        # errors into QGAError itself (see tests/utils/test_qga.py); a client
+        # that did not would escape as OSError, which SensorManager's broad
+        # except still records as a sensor failure.
         sensor = GPUSensor(FakeQGA(error=ConnectionRefusedError("socket gone")))
         with self.assertRaises(OSError):
             sensor.read()

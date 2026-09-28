@@ -113,10 +113,38 @@ class SnapshotTests(ManagerTestCase):
         n = NotificationManager.build_notification(state)
         self.assertEqual(n.alarms, ("a_alarm", "m_alarm", "z_alarm"))
 
+    def test_unmonitored_sensors_become_lost_sensors(self):
+        state = _state(temperatures=[("CPU1 Temp", 40.0)])
+        state.set_unmonitored_sensors(("n8n GPU",))
+        n = NotificationManager.build_notification(state)
+        self.assertEqual(n.lost_sensors, ("n8n GPU",))
+
+    def test_sensors_still_in_their_grace_period_are_not_reported_lost(self):
+        # lost_sensors holds every failing known-good sensor; only the ones
+        # Policy judged overdue reach a notification.
+        state = _state(temperatures=[("CPU1 Temp", 40.0)])
+        state.mark_sensor_lost("Temp")
+        n = NotificationManager.build_notification(state)
+        self.assertEqual(n.lost_sensors, ())
+
+    def test_a_lost_sensor_fires_a_threshold_notifier(self):
+        # End to end through the real trigger and scheduler: the notifier
+        # queues a job exactly as if the sensor had crossed its threshold.
+        manager = self.manager(
+            {"t": _config(**{"Type": "threshold", "Temperature": 80})},
+        )
+        state = _state(temperatures=[("CPU1 Temp", 40.0)])
+        state.set_unmonitored_sensors(("n8n GPU",))
+        manager.dispatch(state)
+        jobs = self.queued(manager, "t")
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0].lost_sensors, ("n8n GPU",))
+
     def test_empty_state(self):
         n = NotificationManager.build_notification(State())
         self.assertEqual(n.readings, ())
         self.assertEqual(n.alarms, ())
+        self.assertEqual(n.lost_sensors, ())
         self.assertEqual(n.operating_mode, "STARTING")
 
     def test_absent_fan_speed_and_command_result_are_none(self):

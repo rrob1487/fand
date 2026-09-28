@@ -46,7 +46,10 @@ class Controller:
         self._sensor_manager.poll(self.state)
         decision = self._policy.evaluate(self.state)
         self._log_fan_decision(decision)
-        self._apply_fan_speed(decision.fan_speed_percent)
+        if decision.automatic_control:
+            self._apply_automatic_control()
+        else:
+            self._apply_fan_speed(decision.fan_speed_percent)
         if decision.shutdown_requested:
             self._shutdown_host()
         self._dispatch_notifications()
@@ -82,19 +85,52 @@ class Controller:
             return
 
         prefix = "[dry-run] " if self._dry_run else ""
-        if self._last_logged_speed is None:
+        if decision.automatic_control:
+            # WARNING, not INFO: the daemon has stopped doing its job and the
+            # machine is back on iDRAC's loud idle until someone looks.
+            _log.warning(
+                "%sSensor(s) lost for too long: %s; returning fan control to "
+                "iDRAC automatic mode until they recover (mode=%s)",
+                prefix, ", ".join(self.state.unmonitored_sensors) or "unknown",
+                decision.mode.name,
+            )
+        elif self._last_logged_mode is None:
             _log.info(
                 "%sFan speed set to %.0f%% (mode=%s)",
                 prefix, decision.fan_speed_percent, decision.mode.name,
             )
         else:
             _log.info(
-                "%sFan speed %.0f%% -> %.0f%% (mode=%s -> %s)",
-                prefix, self._last_logged_speed, decision.fan_speed_percent,
+                "%sFan speed %s -> %.0f%% (mode=%s -> %s)",
+                prefix, _format_speed(self._last_logged_speed),
+                decision.fan_speed_percent,
                 self._last_logged_mode.name, decision.mode.name,
             )
         self._last_logged_speed = decision.fan_speed_percent
         self._last_logged_mode = decision.mode
+
+    def _apply_automatic_control(self) -> None:
+        """Hand the fans to iDRAC while Policy says we cannot see enough.
+
+        Re-asserted every cycle rather than once on entry: the command is
+        idempotent, and a BMC that reset in the meantime would otherwise be
+        left in whatever mode it came back up in. Leaving this mode needs no
+        counterpart -- set_speed() re-enables manual control itself.
+        """
+        if self._dry_run:
+            self.state.set_last_command_result(
+                success=True, detail="[dry-run] would enable iDRAC automatic control",
+            )
+            return
+        try:
+            _enable_automatic_with_retry(self._fan_controller)
+        except IPMIError as exc:
+            _log.error("failed to enable automatic fan control: %s", exc)
+            self.state.set_last_command_result(success=False, detail=str(exc))
+        else:
+            self.state.set_last_command_result(
+                success=True, detail="iDRAC automatic control",
+            )
 
     def _apply_fan_speed(self, percent: float) -> None:
         if self._dry_run:
@@ -143,3 +179,12 @@ class Controller:
 @retry(exceptions=(IPMIError,), attempts=3, backoff=0.5)
 def _set_speed_with_retry(fan_controller: IPMIFanController, percent: float) -> None:
     fan_controller.set_speed(percent)
+
+
+@retry(exceptions=(IPMIError,), attempts=3, backoff=0.5)
+def _enable_automatic_with_retry(fan_controller: IPMIFanController) -> None:
+    fan_controller.enable_automatic_control()
+
+
+def _format_speed(percent: float | None) -> str:
+    return "iDRAC auto" if percent is None else f"{percent:.0f}%"
